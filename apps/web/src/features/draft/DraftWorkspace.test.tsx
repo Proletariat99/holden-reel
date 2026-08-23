@@ -158,6 +158,12 @@ it("prevents regeneration from abandoning an active preview or final render", as
   await screen.findByRole("button", { name: /cancel preview/i });
 
   expect(previewGenerate).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /30 seconds/i })).toBeDisabled();
+  expect(screen.getByLabelText(/audio start/i)).toBeDisabled();
+  expect(screen.getByRole("button", { name: /move second.jpg up/i })).toBeDisabled();
+  expect(screen.getByRole("status")).toHaveTextContent(/render is active.*cancel it or wait/i);
+  await user.click(screen.getByRole("radio", { name: /30 seconds/i }));
+  expect(screen.getByRole("button", { name: /cancel preview/i })).toBeInTheDocument();
   await user.click(previewGenerate);
   expect(previewApi.composePlan).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: /cancel preview/i })).toBeInTheDocument();
@@ -176,6 +182,9 @@ it("prevents regeneration from abandoning an active preview or final render", as
   await user.click(await screen.findByRole("button", { name: /export final/i }));
   const finalGenerate = screen.getByRole("button", { name: /generate draft/i });
   expect(finalGenerate).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /30 seconds/i })).toBeDisabled();
+  expect(screen.getByLabelText(/audio start/i)).toBeDisabled();
+  expect(screen.getByRole("button", { name: /move second.jpg up/i })).toBeDisabled();
   finalRefresh.resolve(runningFinal);
   await screen.findByRole("button", { name: /cancel final export/i });
 
@@ -277,18 +286,55 @@ it.each([
   expect(screen.getByRole("status")).toHaveTextContent(/settings changed.*generate a new draft/i);
 });
 
-it("restores and validates a saved plan and render job after refresh", async () => {
+it("restores and resumes polling an active saved render job after refresh", async () => {
   // Break caught: React-only identifiers disappear on browser reload.
   localStorage.setItem("holden-reel.active", JSON.stringify({
     projectId: "p1", selection, planId: "plan1", previewJobId: "preview1",
   }));
-  const api = fakeApi({ previewJob: renderJob({ status: "succeeded", progress: 1 }) });
+  const api = fakeApi({ previewJob: renderJob({ status: "running", progress: 0.42 }) });
   api.getPlan = vi.fn().mockResolvedValue(plan);
   render(<DraftWorkspace api={api} project={project} selection={selection} />);
   expect(await screen.findByText(plan.rationale)).toBeInTheDocument();
-  expect(await screen.findByLabelText(/reel preview/i)).toHaveAttribute("src", "/api/jobs/preview1/artifact");
+  expect(await screen.findByRole("progressbar", { name: /preview render progress/i })).toHaveAttribute("value", "0.42");
+  expect(screen.getByRole("button", { name: /cancel preview/i })).toBeInTheDocument();
   expect(api.getPlan).toHaveBeenCalledWith("plan1");
   expect(api.getJob).toHaveBeenCalledWith("preview1");
+});
+
+it("gates controls while restoring and ignores a late restore after project change", async () => {
+  // Break caught: late validation can overwrite the new project's draft state.
+  const restore = deferred<ReelPlan>();
+  localStorage.setItem("holden-reel.active", JSON.stringify({
+    projectId: "p1", selection, planId: "plan1", previewJobId: "preview1",
+  }));
+  const api = fakeApi();
+  api.getPlan = vi.fn().mockReturnValue(restore.promise);
+  const view = render(<DraftWorkspace api={api} project={project} selection={selection} />);
+  expect(screen.getByRole("button", { name: /restoring draft/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /15 seconds/i })).toBeDisabled();
+
+  const nextProject = { ...project, id: "p2", name: "Next project" };
+  view.rerender(<DraftWorkspace api={api} project={nextProject} selection={selection} />);
+  restore.resolve(plan);
+
+  await waitFor(() => expect(screen.getByRole("button", { name: /generate draft/i })).toBeEnabled());
+  expect(screen.queryByText(plan.rationale)).not.toBeInTheDocument();
+  expect(localStorage.getItem("holden-reel.active")).toContain('"projectId":"p2"');
+});
+
+it("ignores late restoration after unmount", async () => {
+  // Break caught: an unmounted workspace can publish late state back to localStorage.
+  const restore = deferred<ReelPlan>();
+  localStorage.setItem("holden-reel.active", JSON.stringify({ projectId: "p1", selection, planId: "plan1" }));
+  const api = fakeApi();
+  api.getPlan = vi.fn().mockReturnValue(restore.promise);
+  const view = render(<DraftWorkspace api={api} project={project} selection={selection} />);
+  view.unmount();
+  localStorage.setItem("holden-reel.active", JSON.stringify({ projectId: "p2" }));
+  restore.resolve(plan);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(localStorage.getItem("holden-reel.active")).toBe('{"projectId":"p2"}');
 });
 
 function asset(overrides: Partial<MediaAsset> & Pick<MediaAsset, "id" | "path" | "kind">): MediaAsset {

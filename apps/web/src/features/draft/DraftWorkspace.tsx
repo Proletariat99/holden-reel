@@ -30,23 +30,40 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   const [startingProfile, setStartingProfile] = useState<RenderProfile | null>(null);
   const [actionError, setActionError] = useState<Error | null>(null);
   const [staleMessage, setStaleMessage] = useState<string | null>(null);
-  const restorationStarted = useRef(false);
+  const [isRestoring, setIsRestoring] = useState(() => {
+    const saved = loadActiveWorkspace();
+    return saved?.projectId === project.id && Boolean(saved.planId);
+  });
+  const restorationEpoch = useRef(0);
   const preview = useJob(api, previewJobId);
   const final = useJob(api, finalJobId);
   const assetsById = new Map(selection.assets.map((asset) => [asset.id, asset]));
   const audioAsset = assetsById.get(selection.audioAssetId);
 
   useEffect(() => {
-    if (restorationStarted.current) return;
-    restorationStarted.current = true;
+    const epoch = ++restorationEpoch.current;
+    let isCurrent = true;
     const saved = loadActiveWorkspace();
-    if (!saved || saved.projectId !== project.id || !saved.planId) return;
+    setPlan(null);
+    setPreviewJobId(null);
+    setFinalJobId(null);
+    setDurationMs(15000);
+    setAudioStartSeconds("0");
+    setVisualAssetIds(selection.visualAssetIds);
+    setStaleMessage(null);
+    if (!saved || saved.projectId !== project.id || !saved.planId) {
+      setIsRestoring(false);
+      saveActiveWorkspace({ projectId: project.id, selection });
+      return () => { isCurrent = false; };
+    }
+    setIsRestoring(true);
     void api.getPlan(saved.planId).then(async (restoredPlan) => {
       if (restoredPlan.project_id !== project.id) throw new Error("Saved plan belongs to another project");
       const jobs = await Promise.allSettled([
         saved.previewJobId ? api.getJob(saved.previewJobId) : Promise.resolve(null),
         saved.finalJobId ? api.getJob(saved.finalJobId) : Promise.resolve(null),
       ]);
+      if (!isCurrent || restorationEpoch.current !== epoch) return;
       setPlan(restoredPlan);
       setDurationMs(restoredPlan.duration_ms);
       setAudioStartSeconds(String(restoredPlan.audio.source_start_ms / 1000));
@@ -59,10 +76,14 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
       setFinalJobId(validFinalId);
       saveWorkspace(restoredPlan.id, validPreviewId, validFinalId);
     }).catch(() => {
+      if (!isCurrent || restorationEpoch.current !== epoch) return;
       saveActiveWorkspace({ projectId: project.id, selection });
       setStaleMessage("The saved render could not be restored. Generate a new draft.");
+    }).finally(() => {
+      if (isCurrent && restorationEpoch.current === epoch) setIsRestoring(false);
     });
-  }, [api, project.id, selection]);
+    return () => { isCurrent = false; };
+  }, [api, project.id]);
 
   function saveWorkspace(planId?: string, savedPreviewJobId?: string | null, savedFinalJobId?: string | null) {
     saveActiveWorkspace({
@@ -83,7 +104,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   }
 
   async function handleGenerate() {
-    if (previewInFlight || finalInFlight) return;
+    if (isRestoring || previewInFlight || finalInFlight) return;
     const audioStartMs = validateAudioStart(audioStartSeconds, durationMs, audioAsset);
     if (typeof audioStartMs === "string") {
       setActionError(new Error(audioStartMs));
@@ -135,6 +156,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   }
 
   function moveVisual(index: number, offset: -1 | 1) {
+    if (contentLocked) return;
     const destination = index + offset;
     if (destination < 0 || destination >= visualAssetIds.length) return;
     invalidatePlan();
@@ -150,6 +172,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   const previewInFlight =
     previewJobId !== null && (preview.job?.id !== previewJobId || previewActive);
   const finalInFlight = finalJobId !== null && (final.job?.id !== finalJobId || finalActive);
+  const contentLocked = isRestoring || previewInFlight || finalInFlight;
 
   return (
     <section className="guided-screen draft-workspace" aria-labelledby="draft-heading">
@@ -167,7 +190,8 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
                 type="radio"
                 name="duration"
                 checked={durationMs === 15000}
-                onChange={() => { invalidatePlan(); setDurationMs(15000); }}
+                disabled={contentLocked}
+                onChange={() => { if (!contentLocked) { invalidatePlan(); setDurationMs(15000); } }}
               />
               15 seconds
             </label>
@@ -176,7 +200,8 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
                 type="radio"
                 name="duration"
                 checked={durationMs === 30000}
-                onChange={() => { invalidatePlan(); setDurationMs(30000); }}
+                disabled={contentLocked}
+                onChange={() => { if (!contentLocked) { invalidatePlan(); setDurationMs(30000); } }}
               />
               30 seconds
             </label>
@@ -190,7 +215,8 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
             step="0.1"
             inputMode="decimal"
             value={audioStartSeconds}
-            onChange={(event) => { invalidatePlan(); setAudioStartSeconds(event.target.value); }}
+            disabled={contentLocked}
+            onChange={(event) => { if (!contentLocked) { invalidatePlan(); setAudioStartSeconds(event.target.value); } }}
           />
 
           <div>
@@ -208,7 +234,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
                         className="secondary-button compact-button"
                         type="button"
                         aria-label={`Move ${name} up`}
-                        disabled={index === 0}
+                        disabled={contentLocked || index === 0}
                         onClick={() => moveVisual(index, -1)}
                       >
                         ↑
@@ -217,7 +243,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
                         className="secondary-button compact-button"
                         type="button"
                         aria-label={`Move ${name} down`}
-                        disabled={index === visualAssetIds.length - 1}
+                        disabled={contentLocked || index === visualAssetIds.length - 1}
                         onClick={() => moveVisual(index, 1)}
                       >
                         ↓
@@ -231,10 +257,10 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
 
           <button
             type="button"
-            disabled={isComposing || startingProfile !== null || previewInFlight || finalInFlight}
+            disabled={isRestoring || isComposing || startingProfile !== null || previewInFlight || finalInFlight}
             onClick={() => void handleGenerate()}
           >
-            {isComposing || startingProfile === "preview" ? "Generating draft…" : "Generate draft"}
+            {isRestoring ? "Restoring draft…" : isComposing || startingProfile === "preview" ? "Generating draft…" : "Generate draft"}
           </button>
         </section>
 
@@ -314,6 +340,9 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
       </div>
 
       {actionError ? <ErrorMessage error={actionError} /> : null}
+      {previewInFlight || finalInFlight ? (
+        <p className="muted" role="status">A render is active. Cancel it or wait for it to finish before changing reel settings.</p>
+      ) : null}
       {staleMessage ? <p className="muted" role="status">{staleMessage}</p> : null}
       {preview.error ? <ErrorMessage error={preview.error} /> : null}
       {final.error ? <ErrorMessage error={final.error} /> : null}
