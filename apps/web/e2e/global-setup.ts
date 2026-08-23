@@ -1,27 +1,20 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { connect } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-interface FixtureManifest {
-  "red.mp4": string;
-  "blue.mp4": string;
-  "still.jpg": string;
-  "song.wav": string;
-}
-interface ProcessState { error: Error | null; output: string[] }
-interface OwnedProcess { child: ChildProcess; name: string; port?: number }
+interface FixtureManifest { "red.mp4": string; "blue.mp4": string; "still.jpg": string; "song.wav": string }
+interface ProcessState { error: Error | null; output: string[]; exited: boolean }
+interface OwnedProcess { id: number; name: string; pid?: number; port?: number; state: ProcessState }
+interface GuardianMessage { type: string; id?: number; pid?: number; data?: string; error?: string; code?: number | null }
 
-const processStates = new WeakMap<ChildProcess, ProcessState>();
 const FIXTURE_MEDIA_FILE_COUNT = 4;
 const FIXTURE_FFMPEG_TIMEOUT_MS = 30_000;
 const FIXTURE_WATCHDOG_GRACE_MS = 15_000;
-const FIXTURE_GENERATION_TIMEOUT_MS =
-  FIXTURE_MEDIA_FILE_COUNT * FIXTURE_FFMPEG_TIMEOUT_MS + FIXTURE_WATCHDOG_GRACE_MS;
+const FIXTURE_GENERATION_TIMEOUT_MS = FIXTURE_MEDIA_FILE_COUNT * FIXTURE_FFMPEG_TIMEOUT_MS + FIXTURE_WATCHDOG_GRACE_MS;
 const STARTUP_TIMEOUT_MS = 30_000;
-const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 10_000;
-const FORCED_SHUTDOWN_TIMEOUT_MS = 3_000;
+const CLEANUP_TIMEOUT_MS = 15_000;
+let nextProcessId = 1;
 
 export default async function globalSetup() {
   const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -32,27 +25,30 @@ export default async function globalSetup() {
   const dataRoot = await mkdtemp(resolve(resultsRoot, "api-data-"));
   const descriptorPath = resolve(resultsRoot, "fixture.json");
   const lifecyclePath = resolve(resultsRoot, `lifecycle-${process.pid}.json`);
-  const processes: OwnedProcess[] = [];
+  const temporaryPaths = [fixtureRoot, dataRoot, descriptorPath, lifecyclePath];
   let guardian: ChildProcess | undefined;
   let cleanupPromise: Promise<void> | undefined;
   const cleanup = () => {
-    cleanupPromise ??= cleanupResources(processes, [fixtureRoot, dataRoot, descriptorPath, lifecyclePath])
-      .finally(() => guardian?.kill("SIGTERM"));
+    cleanupPromise ??= guardian === undefined
+      ? Promise.all(temporaryPaths.map((path) => rm(path, { recursive: true, force: true }))).then(() => undefined)
+      : requestGuardianCleanup(guardian);
     return cleanupPromise;
   };
 
   try {
-    await writeLifecycle(lifecyclePath, processes, [fixtureRoot, dataRoot, descriptorPath, lifecyclePath]);
     guardian = spawn(
       process.execPath,
-      [resolve(webRoot, "e2e/process-guardian.mjs"), String(process.pid), lifecyclePath],
-      { detached: true, shell: false, stdio: "ignore" },
+      [resolve(webRoot, "e2e/process-guardian.mjs"), String(process.pid), lifecyclePath, JSON.stringify(temporaryPaths)],
+      { detached: true, shell: false, stdio: ["ignore", "pipe", "pipe", "ipc"] },
     );
-    guardian.unref();
+    const guardianOutput: string[] = [];
+    guardian.stdout?.on("data", (chunk) => guardianOutput.push(String(chunk)));
+    guardian.stderr?.on("data", (chunk) => guardianOutput.push(String(chunk)));
+    await waitForGuardianMessage(guardian, (message) => message.type === "ready", STARTUP_TIMEOUT_MS, guardianOutput);
+
     const stdout = runCaptured(
       "uv", ["run", "python", "tests/fixture_media.py", "--output", fixtureRoot],
-      resolve(repositoryRoot, "apps/api"), FIXTURE_GENERATION_TIMEOUT_MS,
-      "fixture-media generation",
+      resolve(repositoryRoot, "apps/api"), FIXTURE_GENERATION_TIMEOUT_MS, "fixture-media generation",
     );
     const media = JSON.parse(stdout) as FixtureManifest;
     const python = runCaptured(
@@ -60,236 +56,141 @@ export default async function globalSetup() {
       resolve(repositoryRoot, "apps/api"), 10_000, "Python interpreter discovery",
     ).trim();
 
-    const api = startOwnedProcess(
-      "API", python,
+    const api = await startOwnedProcess(
+      guardian, "API", python,
       ["-m", "uvicorn", "holden_reel.main:app", "--app-dir", "src", "--host", "127.0.0.1", "--port", "0"],
       resolve(repositoryRoot, "apps/api"),
       { HOLDEN_REEL_DATA_DIR: dataRoot, PYTHONPATH: resolve(repositoryRoot, "apps/api/src") },
     );
-    processes.push(api);
-    await writeLifecycle(lifecyclePath, processes, [fixtureRoot, dataRoot, descriptorPath, lifecyclePath]);
-    const apiBinding = await waitForBinding(
-      api, /Uvicorn running on (http:\/\/127\.0\.0\.1:(\d+))\b/, STARTUP_TIMEOUT_MS,
-    );
+    const apiBinding = await waitForBinding(api, /Uvicorn running on (http:\/\/127\.0\.0\.1:(\d+))\b/, STARTUP_TIMEOUT_MS);
     const apiUrl = apiBinding[1];
     const apiPort = Number(apiBinding[2]);
     api.port = apiPort;
+    guardian.send?.({ type: "port", id: api.id, port: apiPort });
     await waitForApiIdentity(api, `${apiUrl}/api/health`, STARTUP_TIMEOUT_MS);
 
-    const web = startOwnedProcess(
-      "web", process.execPath,
+    const web = await startOwnedProcess(
+      guardian, "web", process.execPath,
       [resolve(webRoot, "node_modules/vite/bin/vite.js"), "--host", "127.0.0.1", "--port", "0", "--strictPort"],
       webRoot, { HOLDEN_REEL_API_URL: apiUrl },
     );
-    processes.push(web);
-    await writeLifecycle(lifecyclePath, processes, [fixtureRoot, dataRoot, descriptorPath, lifecyclePath]);
-    const webBinding = await waitForBinding(
-      web, /Local:\s+(http:\/\/127\.0\.0\.1:(\d+)\/?)/, STARTUP_TIMEOUT_MS,
-    );
+    const webBinding = await waitForBinding(web, /Local:\s+(http:\/\/127\.0\.0\.1:(\d+)\/?)/, STARTUP_TIMEOUT_MS);
     const webUrl = webBinding[1].replace(/\/$/, "");
     const webPort = Number(webBinding[2]);
     web.port = webPort;
+    guardian.send?.({ type: "port", id: web.id, port: webPort });
     await waitForWebIdentity(web, `${webUrl}/`, STARTUP_TIMEOUT_MS);
 
-    await writeFile(descriptorPath, `${JSON.stringify({
-      folderPath: dirname(media["song.wav"]), apiPort, apiUrl, webPort, webUrl,
-    }, null, 2)}\n`, "utf8");
+    await writeFile(descriptorPath, `${JSON.stringify({ folderPath: dirname(media["song.wav"]), apiPort, apiUrl, webPort, webUrl }, null, 2)}\n`, "utf8");
     console.log(`E2E loopback URLs: API ${apiUrl}; web ${webUrl}`);
   } catch (error) {
     try { await cleanup(); }
-    catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "E2E setup failed and its owned resources could not be fully cleaned");
-    }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "E2E setup and cleanup both failed"); }
     throw error;
   }
   return cleanup;
 }
 
-async function writeLifecycle(path: string, processes: OwnedProcess[], paths: string[]) {
-  await writeFile(path, JSON.stringify({
-    groups: processes.map(({ child }) => child.pid).filter((pid) => pid !== undefined),
-    paths,
-  }), "utf8");
+async function startOwnedProcess(
+  guardian: ChildProcess, name: string, command: string, arguments_: string[], cwd: string,
+  environment: Record<string, string> = {},
+): Promise<OwnedProcess> {
+  const owned: OwnedProcess = { id: nextProcessId++, name, state: { error: null, output: [], exited: false } };
+  guardian.on("message", (raw) => {
+    const message = raw as GuardianMessage;
+    if (message.id !== owned.id) return;
+    if (message.type === "output" && message.data !== undefined) owned.state.output.push(message.data);
+    if (message.type === "child-error") owned.state.error = new Error(message.error);
+    if (message.type === "child-exit") owned.state.exited = true;
+  });
+  const response = waitForGuardianMessage(
+    guardian,
+    (message) => message.id === owned.id && ["spawned", "spawn-error"].includes(message.type),
+    STARTUP_TIMEOUT_MS,
+  );
+  guardian.send({ type: "spawn", id: owned.id, name, command, arguments: arguments_, cwd, environment });
+  const message = await response;
+  if (message.type === "spawn-error" || message.pid === undefined) throw new Error(message.error ?? `${name} spawn failed`);
+  owned.pid = message.pid;
+  return owned;
 }
 
-function runCaptured(
-  command: string, arguments_: string[], cwd: string, timeoutMs: number, description: string,
-): string {
-  try {
-    return execFileSync(command, arguments_, {
-      cwd, encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (error) {
+function waitForGuardianMessage(
+  guardian: ChildProcess, predicate: (message: GuardianMessage) => boolean,
+  timeoutMs: number, output: string[] = [],
+): Promise<GuardianMessage> {
+  return new Promise((resolveMessage, rejectMessage) => {
+    const finish = (error?: Error, message?: GuardianMessage) => {
+      clearTimeout(timeout);
+      guardian.removeListener("message", handleMessage);
+      guardian.removeListener("error", handleError);
+      guardian.removeListener("exit", handleExit);
+      if (error) rejectMessage(error); else resolveMessage(message!);
+    };
+    const handleMessage = (raw: unknown) => { const message = raw as GuardianMessage; if (predicate(message)) finish(undefined, message); };
+    const handleError = (error: Error) => finish(error);
+    const handleExit = (code: number | null) => finish(new Error(`lifecycle guardian exited ${code}${output.length ? `\n${output.join("")}` : ""}`));
+    const timeout = setTimeout(() => finish(new Error(`timed out ${timeoutMs}ms waiting for lifecycle guardian`)), timeoutMs);
+    guardian.on("message", handleMessage);
+    guardian.once("error", handleError);
+    guardian.once("exit", handleExit);
+  });
+}
+
+async function requestGuardianCleanup(guardian: ChildProcess) {
+  if (!guardian.connected) throw new Error("lifecycle guardian disconnected before cleanup confirmation");
+  const id = nextProcessId++;
+  const response = waitForGuardianMessage(
+    guardian, (message) => message.id === id && ["cleaned", "cleanup-error"].includes(message.type), CLEANUP_TIMEOUT_MS,
+  );
+  guardian.send({ type: "cleanup", id });
+  const message = await response;
+  if (message.type === "cleanup-error") throw new Error(message.error);
+}
+
+function runCaptured(command: string, arguments_: string[], cwd: string, timeoutMs: number, description: string): string {
+  try { return execFileSync(command, arguments_, { cwd, encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"] }); }
+  catch (error) {
     const details = error as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
-    const output = [details.stdout, details.stderr]
-      .filter((value) => value !== undefined).map(String).join("").trim();
-    throw new Error(
-      `${description} failed within its ${timeoutMs}ms watchdog: ${details.message}${output ? `\n${output}` : ""}`,
-      { cause: error },
-    );
+    const output = [details.stdout, details.stderr].filter((value) => value !== undefined).map(String).join("").trim();
+    throw new Error(`${description} failed within its ${timeoutMs}ms watchdog: ${details.message}${output ? `\n${output}` : ""}`, { cause: error });
   }
 }
 
-function startOwnedProcess(
-  name: string, command: string, arguments_: string[], cwd: string,
-  environment: Record<string, string> = {},
-): OwnedProcess {
-  const childEnvironment = { ...process.env, ...environment };
-  delete childEnvironment.FORCE_COLOR;
-  delete childEnvironment.NO_COLOR;
-  const child = spawn(command, arguments_, {
-    cwd, env: childEnvironment, detached: process.platform !== "win32",
-    shell: false, stdio: ["ignore", "pipe", "pipe"],
-  });
-  const state: ProcessState = { error: null, output: [] };
-  processStates.set(child, state);
-  child.once("error", (error) => { state.error = error; });
-  child.stdout?.on("data", (chunk) => state.output.push(String(chunk)));
-  child.stderr?.on("data", (chunk) => state.output.push(String(chunk)));
-  return { child, name };
-}
-
-async function waitForBinding(
-  owned: OwnedProcess, pattern: RegExp, timeoutMs: number,
-): Promise<RegExpMatchArray> {
+async function waitForBinding(owned: OwnedProcess, pattern: RegExp, timeoutMs: number): Promise<RegExpMatchArray> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     assertRunning(owned);
-    const match = rawProcessOutput(owned.child).match(pattern);
+    const match = owned.state.output.join("").match(pattern);
     if (match !== null) return match;
     await delay(50);
   }
-  throw new Error(`Timed out waiting ${timeoutMs}ms for ${owned.name} to report its loopback binding${processOutput(owned.child)}`);
+  throw new Error(`Timed out waiting ${timeoutMs}ms for ${owned.name} binding${processOutput(owned)}`);
 }
-
 async function waitForApiIdentity(owned: OwnedProcess, url: string, timeoutMs: number) {
-  const response = await waitForResponse(owned, url, timeoutMs);
-  const payload = (await response.json()) as unknown;
-  const keys = payload !== null && typeof payload === "object"
-    ? Object.keys(payload).sort()
-    : [];
-  if (
-    keys.join(",") !== "status,version"
-    || (payload as { status?: unknown }).status !== "ok"
-    || (payload as { version?: unknown }).version !== "0.1.0"
-  ) {
-    throw new Error(`Owned API returned an unexpected health identity at ${url}: ${JSON.stringify(payload)}`);
+  const payload = (await (await waitForResponse(owned, url, timeoutMs)).json()) as Record<string, unknown>;
+  if (Object.keys(payload).sort().join(",") !== "status,version" || payload.status !== "ok" || payload.version !== "0.1.0") {
+    throw new Error(`Owned API returned unexpected health identity: ${JSON.stringify(payload)}`);
   }
 }
-
 async function waitForWebIdentity(owned: OwnedProcess, url: string, timeoutMs: number) {
-  const response = await waitForResponse(owned, url, timeoutMs);
-  const html = await response.text();
-  if (!html.includes("<title>Holden Reel</title>")) {
-    throw new Error(`Owned web server did not return the Holden Reel index at ${url}`);
+  if (!(await (await waitForResponse(owned, url, timeoutMs)).text()).includes("<title>Holden Reel</title>")) {
+    throw new Error(`Owned web server did not return Holden Reel index at ${url}`);
   }
 }
-
 async function waitForResponse(owned: OwnedProcess, url: string, timeoutMs: number): Promise<Response> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     assertRunning(owned);
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
-      if (response.status === 200) return response;
-      await response.body?.cancel();
-    } catch { /* Binding was reported before the owned server became request-ready. */ }
+    try { const response = await fetch(url, { signal: AbortSignal.timeout(1_000) }); if (response.status === 200) return response; await response.body?.cancel(); }
+    catch { /* Child reported its binding before becoming request-ready. */ }
     await delay(100);
   }
-  throw new Error(`Timed out waiting ${timeoutMs}ms for ${url}${processOutput(owned.child)}`);
+  throw new Error(`Timed out waiting ${timeoutMs}ms for ${url}${processOutput(owned)}`);
 }
-
 function assertRunning(owned: OwnedProcess) {
-  const state = processStates.get(owned.child);
-  if (state?.error) throw new Error(`${owned.name} test server failed to start: ${state.error.message}${processOutput(owned.child)}`);
-  if (owned.child.exitCode !== null || owned.child.signalCode !== null) {
-    throw new Error(`${owned.name} test server exited with code ${owned.child.exitCode}${processOutput(owned.child)}`);
-  }
+  if (owned.state.error) throw new Error(`${owned.name} failed: ${owned.state.error.message}${processOutput(owned)}`);
+  if (owned.state.exited) throw new Error(`${owned.name} exited${processOutput(owned)}`);
 }
-function rawProcessOutput(child: ChildProcess) { return processStates.get(child)?.output.join("") ?? ""; }
-function processOutput(child: ChildProcess) {
-  const text = rawProcessOutput(child).trim();
-  return text ? `\n${text}` : "";
-}
-
-async function cleanupResources(processes: OwnedProcess[], paths: string[]) {
-  const failures: unknown[] = [];
-  for (const owned of [...processes].reverse()) {
-    try { await stopOwnedProcess(owned); } catch (error) { failures.push(error); }
-  }
-  if (failures.length > 0) {
-    throw new AggregateError(failures, "Owned E2E servers did not terminate; temporary resources were retained");
-  }
-  await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true })));
-}
-
-async function stopOwnedProcess(owned: OwnedProcess) {
-  if (owned.child.pid === undefined) return;
-  signalOwnedProcess(owned.child, "SIGTERM");
-  if (await waitForShutdown(owned, GRACEFUL_SHUTDOWN_TIMEOUT_MS)) return;
-  if (process.platform === "win32") {
-    runCaptured(
-      "taskkill", ["/PID", String(owned.child.pid), "/T", "/F"], process.cwd(),
-      FORCED_SHUTDOWN_TIMEOUT_MS, `${owned.name} process-tree termination`,
-    );
-  } else signalOwnedProcess(owned.child, "SIGKILL");
-  if (await waitForShutdown(owned, FORCED_SHUTDOWN_TIMEOUT_MS)) return;
-  throw new Error(`${owned.name} process group ${owned.child.pid} or loopback listener did not terminate within ${GRACEFUL_SHUTDOWN_TIMEOUT_MS + FORCED_SHUTDOWN_TIMEOUT_MS}ms${processOutput(owned.child)}`);
-}
-
-function signalOwnedProcess(child: ChildProcess, signal: NodeJS.Signals) {
-  if (child.pid === undefined) return;
-  try {
-    if (process.platform === "win32") child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-  }
-}
-
-async function waitForShutdown(owned: OwnedProcess, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const childExited = owned.child.exitCode !== null || owned.child.signalCode !== null;
-    const processTreeExited = process.platform === "win32"
-      ? childExited
-      : !isProcessGroupAlive(owned.child.pid);
-    const listenerClosed = owned.port === undefined || !(await isLoopbackPortOpen(owned.port));
-    if (processTreeExited && listenerClosed) return true;
-    await delay(50);
-  }
-  return false;
-}
-
-function isProcessGroupAlive(processGroupId: number | undefined): boolean {
-  if (processGroupId === undefined) return false;
-  try {
-    process.kill(-processGroupId, 0);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-    throw error;
-  }
-}
-
-async function isLoopbackPortOpen(port: number): Promise<boolean> {
-  return new Promise((resolveOpen) => {
-    const socket = connect({ host: "127.0.0.1", port });
-    let settled = false;
-    const finish = (open: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.removeAllListeners();
-      socket.destroy();
-      resolveOpen(open);
-    };
-    socket.setTimeout(250);
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false));
-    socket.once("error", () => finish(false));
-  });
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
-}
+function processOutput(owned: OwnedProcess) { const text = owned.state.output.join("").trim(); return text ? `\n${text}` : ""; }
+function delay(milliseconds: number): Promise<void> { return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds)); }
