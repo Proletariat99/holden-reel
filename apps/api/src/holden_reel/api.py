@@ -2,8 +2,7 @@ from collections.abc import Iterator
 import os
 from pathlib import Path
 import stat
-from typing import BinaryIO
-from typing import Literal
+from typing import BinaryIO, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Request, Response, status
@@ -142,8 +141,8 @@ def get_job_artifact(job_id: UUID, request: Request) -> StreamingResponse:
         request.app.state.settings.data_dir, Path(job.artifact_path)
     )
     filename = f"holden-reel-{job.kind}-{job.id}.mp4"
-    return StreamingResponse(
-        _stream_file(artifact),
+    return _ArtifactStreamingResponse(
+        artifact,
         media_type="video/mp4",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
@@ -265,6 +264,18 @@ def _stream_file(artifact: BinaryIO, chunk_size: int = 64 * 1024) -> Iterator[by
             yield chunk
     finally:
         artifact.close()
+
+
+class _ArtifactStreamingResponse(StreamingResponse):
+    def __init__(self, artifact: BinaryIO, **kwargs):
+        self._artifact = artifact
+        super().__init__(_stream_file(artifact), **kwargs)
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._artifact.close()
 
 
 def _unsafe_artifact_path() -> DomainError:

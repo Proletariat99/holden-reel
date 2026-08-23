@@ -9,8 +9,9 @@ import time
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from holden_reel.api import api_router, register_error_handlers
 from holden_reel.artifacts import ArtifactStore
@@ -208,12 +209,16 @@ def _close_harness(harness: ServiceHarness) -> None:
 
 
 def _artifact_client(harness: ServiceHarness) -> TestClient:
+    return TestClient(_artifact_app(harness))
+
+
+def _artifact_app(harness: ServiceHarness) -> FastAPI:
     app = FastAPI()
     app.state.job_service = harness.service
     app.state.settings = Settings(data_dir=harness.data_dir)
     register_error_handlers(app)
     app.include_router(api_router)
-    return TestClient(app)
+    return app
 
 
 def test_artifact_download_rejects_a_job_that_has_not_succeeded(tmp_path):
@@ -335,6 +340,63 @@ def test_artifact_download_rejects_entry_replaced_by_external_symlink_before_ope
         }
         assert external_secret.read_bytes() not in response.content
     finally:
+        _close_harness(harness)
+
+
+@pytest.mark.asyncio
+async def test_artifact_response_closes_pinned_file_immediately_when_send_disconnects(
+    tmp_path, monkeypatch
+):
+    """Would fail if ASGI send failure left the pinned artifact open until garbage collection."""
+    import holden_reel.api as api_module
+
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    opened_artifact = None
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        _wait_for_terminal_job(harness.service, job.id)
+        real_open_artifact = api_module._open_artifact
+
+        def capture_open_artifact(data_dir: Path, artifact_path: Path):
+            nonlocal opened_artifact
+            opened_artifact, size = real_open_artifact(data_dir, artifact_path)
+            return opened_artifact, size
+
+        monkeypatch.setattr(api_module, "_open_artifact", capture_open_artifact)
+        app = _artifact_app(harness)
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": f"/api/jobs/{job.id}/artifact",
+            "raw_path": b"/api/jobs/artifact",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [],
+            "client": ("test", 123),
+            "server": ("testserver", 80),
+            "app": app,
+        }
+        response = api_module.get_job_artifact(job.id, Request(scope))
+        assert opened_artifact is not None
+        assert not opened_artifact.closed
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                raise ClientDisconnect
+
+        with pytest.raises(ClientDisconnect):
+            await response(scope, receive, send)
+
+        assert opened_artifact.closed
+    finally:
+        if opened_artifact is not None:
+            opened_artifact.close()
         _close_harness(harness)
 
 

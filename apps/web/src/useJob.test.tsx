@@ -157,6 +157,38 @@ it("keeps polling an active job after a transient ApiError", async () => {
   expect(getJob).toHaveBeenCalledTimes(4);
 });
 
+it("retries when the first poll fails before any job state is known", async () => {
+  // Break caught: an initial transient failure strands a valid job before its first state arrives.
+  vi.useFakeTimers();
+  const apiError = new ApiError("temporarily_unavailable", "Try again", {});
+  const getJob = vi
+    .fn<ApiClient["getJob"]>()
+    .mockRejectedValueOnce(apiError)
+    .mockResolvedValueOnce(runningJob)
+    .mockResolvedValueOnce(succeededJob);
+  const api = fakeApi({ getJob });
+  const { result } = renderHook(() => useJob(api, "j1"));
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100);
+  });
+  expect(result.current.job).toBeNull();
+  expect(result.current.error).toBe(apiError);
+  expect(getJob).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
+  expect(result.current.job?.status).toBe("succeeded");
+  expect(result.current.error).toBeNull();
+  expect(getJob).toHaveBeenCalledTimes(3);
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(getJob).toHaveBeenCalledTimes(3);
+});
+
 it("aborts a deferred cancel refresh and resets cancelling when the job id changes", async () => {
   // Break caught: a cancel started for an old ID leaves the replacement job permanently cancelling.
   const cancelRequest = deferred<RenderJob>();

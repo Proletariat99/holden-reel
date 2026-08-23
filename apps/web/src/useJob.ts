@@ -33,7 +33,7 @@ export function useJob(api: ApiClient, jobId: string | null) {
 
   useEffect(() => {
     let active = true;
-    let lastJob: RenderJob | null = null;
+    let terminalObserved = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
 
@@ -59,16 +59,16 @@ export function useJob(api: ApiClient, jobId: string | null) {
       try {
         const nextJob = await api.getJob(pollJobId, controller.signal);
         if (!active || controller.signal.aborted) return;
-        lastJob = nextJob;
         setJob(nextJob);
         setError(null);
-        if (!TERMINAL_STATUSES.has(nextJob.status)) {
+        terminalObserved = TERMINAL_STATUSES.has(nextJob.status);
+        if (!terminalObserved) {
           timer = setTimeout(() => void poll(pollJobId), POLL_INTERVAL_MS);
         }
       } catch (reason: unknown) {
         if (!active || controller.signal.aborted) return;
         setError(toError(reason));
-        if (lastJob !== null && !TERMINAL_STATUSES.has(lastJob.status)) {
+        if (!terminalObserved) {
           timer = setTimeout(() => void poll(pollJobId), POLL_INTERVAL_MS);
         }
       }
