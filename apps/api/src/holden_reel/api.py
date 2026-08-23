@@ -5,6 +5,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .errors import DomainError
 from .projects import Project, ProjectService
@@ -37,6 +38,26 @@ def get_project(project_id: UUID, request: Request) -> Project:
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(StarletteHTTPException)
+    async def handle_http_error(
+        _: Request, error: StarletteHTTPException
+    ) -> JSONResponse:
+        details = {"status_code": error.status_code}
+        message = error.detail if isinstance(error.detail, str) else "HTTP request failed"
+        if not isinstance(error.detail, str):
+            details["detail"] = jsonable_encoder(error.detail)
+        return JSONResponse(
+            status_code=error.status_code,
+            content={
+                "error": {
+                    "code": "http_error",
+                    "message": message,
+                    "details": details,
+                }
+            },
+            headers=error.headers,
+        )
+
     @app.exception_handler(DomainError)
     async def handle_domain_error(_: Request, error: DomainError) -> JSONResponse:
         return JSONResponse(

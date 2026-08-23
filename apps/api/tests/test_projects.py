@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+
+
 def test_create_and_reopen_project(client):
     created = client.post("/api/projects", json={"name": "August rehearsal"})
     assert created.status_code == 201
@@ -42,3 +45,44 @@ def test_invalid_project_payload_uses_error_contract(client):
     assert error["code"] == "invalid_request"
     assert error["message"] == "Request validation failed"
     assert error["details"]["errors"][0]["loc"] == ["body", "name"]
+
+
+def test_unknown_route_uses_global_error_contract(client):
+    response = client.get("/api/not-a-route")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "http_error",
+            "message": "Not Found",
+            "details": {"status_code": 404},
+        }
+    }
+
+
+def test_unsupported_method_uses_global_error_contract(client):
+    response = client.put("/api/projects")
+
+    assert response.status_code == 405
+    assert response.json() == {
+        "error": {
+            "code": "http_error",
+            "message": "Method Not Allowed",
+            "details": {"status_code": 405},
+        }
+    }
+
+
+def test_concurrent_project_creates_are_all_persisted(client):
+    def create_project(index: int):
+        return client.post("/api/projects", json={"name": f"Project {index}"})
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        responses = list(executor.map(create_project, range(32)))
+
+    assert [response.status_code for response in responses] == [201] * 32
+    listed = client.get("/api/projects")
+    assert listed.status_code == 200
+    assert {project["name"] for project in listed.json()} == {
+        f"Project {index}" for index in range(32)
+    }

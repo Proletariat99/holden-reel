@@ -1,5 +1,37 @@
 import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
+
+
+class Database:
+    """Serialize access to a shared SQLite connection owned by the application."""
+
+    def __init__(self, connection: sqlite3.Connection):
+        self._connection = connection
+        self._lock = RLock()
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            try:
+                yield self._connection
+            except BaseException:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+
+    def fetch_all(self, query: str, parameters: Sequence[object] = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._connection.execute(query, parameters).fetchall()
+
+    def fetch_one(
+        self, query: str, parameters: Sequence[object] = ()
+    ) -> sqlite3.Row | None:
+        with self._lock:
+            return self._connection.execute(query, parameters).fetchone()
 
 
 def open_database(path: Path) -> sqlite3.Connection:

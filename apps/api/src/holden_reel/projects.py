@@ -1,9 +1,9 @@
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from .errors import DomainError
+from .db import Database
 
 
 @dataclass(frozen=True)
@@ -15,12 +15,12 @@ class Project:
 
 
 class ProjectRepository:
-    def __init__(self, connection: sqlite3.Connection):
-        self.connection = connection
+    def __init__(self, database: Database):
+        self.database = database
 
     def insert(self, project: Project) -> Project:
-        with self.connection:
-            self.connection.execute(
+        with self.database.transaction() as connection:
+            connection.execute(
                 """
                 INSERT INTO projects (id, name, created_at, updated_at)
                 VALUES (?, ?, ?, ?)
@@ -35,17 +35,15 @@ class ProjectRepository:
         return project
 
     def list_all(self) -> list[Project]:
-        rows = self.connection.execute("SELECT * FROM projects ORDER BY rowid").fetchall()
+        rows = self.database.fetch_all("SELECT * FROM projects ORDER BY rowid")
         return [self._to_project(row) for row in rows]
 
     def get(self, project_id: UUID) -> Project | None:
-        row = self.connection.execute(
-            "SELECT * FROM projects WHERE id = ?", (str(project_id),)
-        ).fetchone()
+        row = self.database.fetch_one("SELECT * FROM projects WHERE id = ?", (str(project_id),))
         return self._to_project(row) if row is not None else None
 
     @staticmethod
-    def _to_project(row: sqlite3.Row) -> Project:
+    def _to_project(row) -> Project:
         return Project(
             id=UUID(row["id"]),
             name=row["name"],
