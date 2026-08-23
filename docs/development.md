@@ -119,7 +119,9 @@ Run the complete Playwright workflow with one Chromium worker:
 make test-e2e
 ```
 
-The test starts loopback-only API and Vite servers with bounded readiness and
-render timeouts, uses an isolated temporary `HOLDEN_REEL_DATA_DIR`, verifies
-actual preview playback and seeking, exports the final render, and checks that
-the downloaded MP4 is nonempty.
+The test allocates fresh non-default loopback ports for its API and Vite
+servers, starts them with bounded readiness and render timeouts, uses an
+isolated temporary `HOLDEN_REEL_DATA_DIR`, verifies actual preview playback and
+seeking, exports the final render, and checks that the downloaded MP4 is
+nonempty. It prints the exact loopback URLs for each run and tears down both
+processes and their generated fixture/application data on success or failure.

@@ -6,6 +6,10 @@ import { expect, test } from "@playwright/test";
 
 interface FixtureDescriptor {
   folderPath: string;
+  apiPort: number;
+  apiUrl: string;
+  webPort: number;
+  webUrl: string;
 }
 
 const fixtureDescriptorPath = resolve(
@@ -18,7 +22,14 @@ test("creates a project and exports a playable, seekable reel", async ({ page })
     await readFile(fixtureDescriptorPath, "utf8"),
   ) as FixtureDescriptor;
 
-  await page.goto("/");
+  expect(fixture.apiPort).toBeGreaterThan(0);
+  expect(fixture.apiPort).not.toBe(8000);
+  expect(fixture.apiUrl).toBe(`http://127.0.0.1:${fixture.apiPort}`);
+  expect(fixture.webPort).toBeGreaterThan(0);
+  expect(fixture.webPort).not.toBe(4173);
+  expect(fixture.webUrl).toBe(`http://127.0.0.1:${fixture.webPort}`);
+
+  await page.goto(fixture.webUrl);
   await page.getByLabel("Project name").fill("Golden Reel");
   await page.getByRole("button", { name: "Create project" }).click();
 

@@ -237,6 +237,9 @@ class _UnsatisfiableRange(Exception):
     pass
 
 
+_MAX_RANGE_NUMBER_DIGITS = 20
+
+
 def _parse_byte_range(value: str, size: int) -> tuple[int, int]:
     unit, separator, byte_range = value.strip().partition("=")
     if unit.lower() != "bytes" or separator != "=" or "," in byte_range:
@@ -246,15 +249,11 @@ def _parse_byte_range(value: str, size: int) -> tuple[int, int]:
         raise _UnsatisfiableRange
 
     if start_text:
-        if not start_text.isascii() or not start_text.isdigit():
-            raise _UnsatisfiableRange
-        start = int(start_text)
+        start = _parse_range_number(start_text)
         if start >= size:
             raise _UnsatisfiableRange
         if end_text:
-            if not end_text.isascii() or not end_text.isdigit():
-                raise _UnsatisfiableRange
-            requested_end = int(end_text)
+            requested_end = _parse_range_number(end_text)
             if requested_end < start:
                 raise _UnsatisfiableRange
             end = min(requested_end, size - 1)
@@ -262,12 +261,23 @@ def _parse_byte_range(value: str, size: int) -> tuple[int, int]:
             end = size - 1
         return start, end
 
-    if not end_text.isascii() or not end_text.isdigit():
-        raise _UnsatisfiableRange
-    suffix_length = int(end_text)
+    suffix_length = _parse_range_number(end_text)
     if suffix_length <= 0:
         raise _UnsatisfiableRange
     return max(0, size - suffix_length), size - 1
+
+
+def _parse_range_number(value: str) -> int:
+    if (
+        len(value) > _MAX_RANGE_NUMBER_DIGITS
+        or not value.isascii()
+        or not value.isdigit()
+    ):
+        raise _UnsatisfiableRange
+    try:
+        return int(value)
+    except (ValueError, OverflowError):
+        raise _UnsatisfiableRange from None
 
 
 def _open_verified_root(path: Path) -> int:

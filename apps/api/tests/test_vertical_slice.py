@@ -7,9 +7,31 @@ import subprocess
 import time
 
 from fastapi.testclient import TestClient
+import pytest
 
 
 RENDER_TIMEOUT_SECONDS = 120.0
+FFPROBE_TIMEOUT_SECONDS = 30
+
+
+def test_acceptance_ffprobe_timeout_has_a_deterministic_failure(tmp_path: Path):
+    """Would fail if final artifact verification could hang without a clear bound."""
+    observed_timeouts: list[float | None] = []
+    artifact = tmp_path / "final.mp4"
+    artifact.write_bytes(b"incomplete acceptance artifact")
+
+    def time_out(command, **kwargs):
+        observed_timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(command, 30)
+
+    with pytest.raises(
+        AssertionError,
+        match="^FFprobe acceptance verification timed out after 30 seconds$",
+    ):
+        _probe_artifact("ffprobe", artifact, runner=time_out)
+
+    assert observed_timeouts == [30]
+    assert not artifact.exists()
 
 
 def test_complete_http_workflow_exports_verified_final_without_modifying_sources(
@@ -63,23 +85,7 @@ def test_complete_http_workflow_exports_verified_final_without_modifying_sources
     artifact = tmp_path / "downloaded-final.mp4"
     artifact.write_bytes(downloaded.content)
 
-    probe = subprocess.run(
-        [
-            ffprobe,
-            "-v",
-            "error",
-            "-show_format",
-            "-show_streams",
-            "-of",
-            "json",
-            str(artifact),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        shell=False,
-    )
-    metadata = json.loads(probe.stdout)
+    metadata = _probe_artifact(ffprobe, artifact)
     video = next(
         stream for stream in metadata["streams"] if stream["codec_type"] == "video"
     )
@@ -94,6 +100,34 @@ def test_complete_http_workflow_exports_verified_final_without_modifying_sources
     assert {
         name: _sha256(path) for name, path in media_fixture.paths.items()
     } == source_hashes
+
+
+def _probe_artifact(ffprobe: str, artifact: Path, runner=subprocess.run) -> dict:
+    try:
+        probe = runner(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_format",
+                "-show_streams",
+                "-of",
+                "json",
+                str(artifact),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            shell=False,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        artifact.unlink(missing_ok=True)
+        raise AssertionError(
+            "FFprobe acceptance verification timed out after "
+            f"{FFPROBE_TIMEOUT_SECONDS} seconds"
+        ) from None
+    return json.loads(probe.stdout)
 
 
 def _wait_for_terminal_job(client: TestClient, job_id: str) -> dict:

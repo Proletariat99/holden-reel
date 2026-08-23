@@ -359,6 +359,65 @@ def test_artifact_download_rejects_invalid_or_multiple_byte_ranges(
         _close_harness(harness)
 
 
+@pytest.mark.parametrize(
+    "range_header",
+    [
+        "bytes=" + "9" * 5_000 + "-",
+        "bytes=0-" + "9" * 5_000,
+        "bytes=-" + "9" * 5_000,
+    ],
+    ids=["explicit-start", "explicit-end", "suffix"],
+)
+def test_artifact_download_rejects_oversized_range_and_closes_pinned_file(
+    tmp_path, monkeypatch, range_header
+):
+    """Would fail if oversized numeric ranges escaped 416 handling or leaked the open file."""
+    import holden_reel.api as api_module
+
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    opened_artifact = None
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        _wait_for_terminal_job(harness.service, job.id)
+        real_open_artifact = api_module._open_artifact
+
+        def capture_open_artifact(data_dir: Path, artifact_path: Path):
+            nonlocal opened_artifact
+            opened_artifact, size = real_open_artifact(data_dir, artifact_path)
+            return opened_artifact, size
+
+        monkeypatch.setattr(api_module, "_open_artifact", capture_open_artifact)
+        app = _artifact_app(harness)
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": f"/api/jobs/{job.id}/artifact",
+            "raw_path": b"/api/jobs/artifact",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"range", range_header.encode("ascii"))],
+            "client": ("test", 123),
+            "server": ("testserver", 80),
+            "app": app,
+        }
+
+        response = api_module.get_job_artifact(job.id, Request(scope))
+
+        assert response.status_code == 416
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-range"] == "bytes */8"
+        assert response.body == b""
+        assert opened_artifact is not None
+        assert opened_artifact.closed
+    finally:
+        if opened_artifact is not None:
+            opened_artifact.close()
+        _close_harness(harness)
+
+
 def test_artifact_download_rejects_entry_replaced_by_external_symlink_before_open(
     tmp_path, monkeypatch
 ):

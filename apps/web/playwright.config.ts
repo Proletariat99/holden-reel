@@ -1,5 +1,8 @@
 import { defineConfig } from "@playwright/test";
 
+delete process.env.FORCE_COLOR;
+delete process.env.NO_COLOR;
+
 export default defineConfig({
   testDir: "./e2e",
   outputDir: "./test-results/playwright",
@@ -11,7 +14,6 @@ export default defineConfig({
     timeout: 10_000,
   },
   use: {
-    baseURL: "http://127.0.0.1:4173",
     trace: "retain-on-failure",
   },
 });

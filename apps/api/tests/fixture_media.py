@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 
+FFMPEG_TIMEOUT_SECONDS = 30
+
+
 @dataclass(frozen=True)
 class FixtureMedia:
     root: Path
@@ -18,7 +21,18 @@ def _run_ffmpeg(arguments: list[str]) -> None:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         pytest.skip("FFmpeg is required to generate media fixtures but was not found")
-    subprocess.run([ffmpeg, "-y", *arguments], check=True, capture_output=True, shell=False)
+    try:
+        subprocess.run(
+            [ffmpeg, "-y", *arguments],
+            check=True,
+            capture_output=True,
+            shell=False,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"FFmpeg fixture generation timed out after {FFMPEG_TIMEOUT_SECONDS} seconds"
+        ) from None
 
 
 def generate_fixture_media(root: Path) -> dict[str, Path]:
@@ -29,30 +43,35 @@ def generate_fixture_media(root: Path) -> dict[str, Path]:
         "still.jpg": root / "still.jpg",
         "song.wav": root / "song.wav",
     }
-    _run_ffmpeg(
-        [
-            "-f", "lavfi", "-i", "color=c=red:s=320x240:r=30:d=4",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(paths["red.mp4"]),
-        ]
-    )
-    _run_ffmpeg(
-        [
-            "-f", "lavfi", "-i", "color=c=blue:s=240x320:r=30:d=4",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(paths["blue.mp4"]),
-        ]
-    )
-    _run_ffmpeg(
-        [
-            "-f", "lavfi", "-i", "color=c=yellow:s=320x240",
-            "-frames:v", "1", str(paths["still.jpg"]),
-        ]
-    )
-    _run_ffmpeg(
-        [
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=18",
-            "-c:a", "pcm_s16le", str(paths["song.wav"]),
-        ]
-    )
+    try:
+        _run_ffmpeg(
+            [
+                "-f", "lavfi", "-i", "color=c=red:s=320x240:r=30:d=4",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(paths["red.mp4"]),
+            ]
+        )
+        _run_ffmpeg(
+            [
+                "-f", "lavfi", "-i", "color=c=blue:s=240x320:r=30:d=4",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(paths["blue.mp4"]),
+            ]
+        )
+        _run_ffmpeg(
+            [
+                "-f", "lavfi", "-i", "color=c=yellow:s=320x240",
+                "-frames:v", "1", str(paths["still.jpg"]),
+            ]
+        )
+        _run_ffmpeg(
+            [
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=18",
+                "-c:a", "pcm_s16le", str(paths["song.wav"]),
+            ]
+        )
+    except BaseException:
+        for path in paths.values():
+            path.unlink(missing_ok=True)
+        raise
     return {name: path.resolve() for name, path in paths.items()}
 
 
