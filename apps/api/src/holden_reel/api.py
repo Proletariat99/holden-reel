@@ -122,7 +122,7 @@ def get_job(job_id: UUID, request: Request) -> Job:
 
 
 @api_router.get("/jobs/{job_id}/artifact", response_class=StreamingResponse)
-def get_job_artifact(job_id: UUID, request: Request) -> StreamingResponse:
+def get_job_artifact(job_id: UUID, request: Request) -> Response:
     job = job_service(request).get(job_id)
     if job.status != "succeeded":
         raise DomainError(
@@ -141,13 +141,46 @@ def get_job_artifact(job_id: UUID, request: Request) -> StreamingResponse:
         request.app.state.settings.data_dir, Path(job.artifact_path)
     )
     filename = f"holden-reel-{job.kind}-{job.id}.mp4"
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f'inline; filename="{filename}"',
+    }
+    range_header = request.headers.get("range")
+    if range_header is not None:
+        try:
+            start, end = _parse_byte_range(range_header, size)
+        except _UnsatisfiableRange:
+            artifact.close()
+            return Response(
+                status_code=status.HTTP_416_RANGE_NOT_SATISFIABLE,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes */{size}",
+                    "Content-Length": "0",
+                },
+            )
+        length = end - start + 1
+        headers.update(
+            {
+                "Content-Range": f"bytes {start}-{end}/{size}",
+                "Content-Length": str(length),
+            }
+        )
+        return _ArtifactStreamingResponse(
+            artifact,
+            start=start,
+            length=length,
+            status_code=status.HTTP_206_PARTIAL_CONTENT,
+            media_type="video/mp4",
+            headers=headers,
+            background=BackgroundTask(artifact.close),
+        )
+
+    headers["Content-Length"] = str(size)
     return _ArtifactStreamingResponse(
         artifact,
         media_type="video/mp4",
-        headers={
-            "Content-Disposition": f'inline; filename="{filename}"',
-            "Content-Length": str(size),
-        },
+        headers=headers,
         background=BackgroundTask(artifact.close),
     )
 
@@ -198,6 +231,43 @@ def _open_artifact(data_dir: Path, artifact_path: Path) -> tuple[BinaryIO, int]:
 
 class _UnsafeArtifact(Exception):
     pass
+
+
+class _UnsatisfiableRange(Exception):
+    pass
+
+
+def _parse_byte_range(value: str, size: int) -> tuple[int, int]:
+    unit, separator, byte_range = value.strip().partition("=")
+    if unit.lower() != "bytes" or separator != "=" or "," in byte_range:
+        raise _UnsatisfiableRange
+    start_text, dash, end_text = byte_range.partition("-")
+    if dash != "-" or (not start_text and not end_text) or size <= 0:
+        raise _UnsatisfiableRange
+
+    if start_text:
+        if not start_text.isascii() or not start_text.isdigit():
+            raise _UnsatisfiableRange
+        start = int(start_text)
+        if start >= size:
+            raise _UnsatisfiableRange
+        if end_text:
+            if not end_text.isascii() or not end_text.isdigit():
+                raise _UnsatisfiableRange
+            requested_end = int(end_text)
+            if requested_end < start:
+                raise _UnsatisfiableRange
+            end = min(requested_end, size - 1)
+        else:
+            end = size - 1
+        return start, end
+
+    if not end_text.isascii() or not end_text.isdigit():
+        raise _UnsatisfiableRange
+    suffix_length = int(end_text)
+    if suffix_length <= 0:
+        raise _UnsatisfiableRange
+    return max(0, size - suffix_length), size - 1
 
 
 def _open_verified_root(path: Path) -> int:
@@ -258,18 +328,42 @@ def _verify_same_inode(before, after, expected_type) -> None:
         raise _UnsafeArtifact
 
 
-def _stream_file(artifact: BinaryIO, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+def _stream_file(
+    artifact: BinaryIO,
+    *,
+    start: int = 0,
+    length: int | None = None,
+    chunk_size: int = 64 * 1024,
+) -> Iterator[bytes]:
     try:
-        while chunk := artifact.read(chunk_size):
+        artifact.seek(start)
+        remaining = length
+        while remaining is None or remaining > 0:
+            read_size = chunk_size if remaining is None else min(chunk_size, remaining)
+            chunk = artifact.read(read_size)
+            if not chunk:
+                break
             yield chunk
+            if remaining is not None:
+                remaining -= len(chunk)
     finally:
         artifact.close()
 
 
 class _ArtifactStreamingResponse(StreamingResponse):
-    def __init__(self, artifact: BinaryIO, **kwargs):
+    def __init__(
+        self,
+        artifact: BinaryIO,
+        *,
+        start: int = 0,
+        length: int | None = None,
+        **kwargs,
+    ):
         self._artifact = artifact
-        super().__init__(_stream_file(artifact), **kwargs)
+        super().__init__(
+            _stream_file(artifact, start=start, length=length),
+            **kwargs,
+        )
 
     async def __call__(self, scope, receive, send) -> None:
         try:

@@ -12,9 +12,10 @@ The first goal is simple: go from a small, messy folder of band media to a
 postable Reel in under 10 minutes.
 
 > [!NOTE]
-> Holden Reel is currently in product design. The implementation has not been
-> scaffolded yet. See the [MVP design spec](docs/superpowers/specs/2026-08-23-holden-reel-mvp-design.md)
-> for the approved product and technical direction.
+> The deterministic local ingest-to-export vertical slice is complete. It
+> creates projects, catalogs local media in place, persists a 15- or 30-second
+> reel plan, renders playable previews, and exports verified MP4 files. The
+> constrained creative agent and guided refinement remain future work.
 
 ## Product principles
 
@@ -109,15 +110,16 @@ The first version intentionally excludes:
 
 - [x] Product discovery
 - [x] Architecture and MVP design
-- [ ] Implementation plan
-- [ ] Application scaffold
-- [ ] First ingest-to-export vertical slice
+- [x] Implementation plan
+- [x] Application scaffold
+- [x] First ingest-to-export vertical slice
 - [ ] Creative-agent draft generation
 - [ ] Guided refinement and brand kit
 - [ ] External-drive performance validation
 
 ## Documentation
 
+- [Local development and verification](docs/development.md)
 - [MVP design spec](docs/superpowers/specs/2026-08-23-holden-reel-mvp-design.md)
 - [MIT license](LICENSE)
 

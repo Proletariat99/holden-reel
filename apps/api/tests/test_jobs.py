@@ -304,6 +304,61 @@ def test_artifact_download_returns_mp4_with_a_server_generated_safe_filename(tmp
         _close_harness(harness)
 
 
+@pytest.mark.parametrize(
+    ("range_header", "expected_body", "expected_content_range"),
+    [
+        ("bytes=2-5", b"ke m", "bytes 2-5/8"),
+        ("bytes=5-", b"mp4", "bytes 5-7/8"),
+        ("bytes=-3", b"mp4", "bytes 5-7/8"),
+    ],
+)
+def test_artifact_download_streams_one_byte_range_from_the_pinned_file(
+    tmp_path, range_header, expected_body, expected_content_range
+):
+    """Would fail if browsers could not request an exact seek range from the pinned artifact."""
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        _wait_for_terminal_job(harness.service, job.id)
+
+        response = _artifact_client(harness).get(
+            f"/api/jobs/{job.id}/artifact", headers={"Range": range_header}
+        )
+
+        assert response.status_code == 206
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-range"] == expected_content_range
+        assert response.headers["content-length"] == str(len(expected_body))
+        assert response.content == expected_body
+    finally:
+        _close_harness(harness)
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    ["bytes=8-", "bytes=0-1,3-4", "items=0-1", "bytes=-0"],
+)
+def test_artifact_download_rejects_invalid_or_multiple_byte_ranges(
+    tmp_path, range_header
+):
+    """Would fail if malformed, unsatisfiable, or multiple ranges returned misleading bytes."""
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        _wait_for_terminal_job(harness.service, job.id)
+
+        response = _artifact_client(harness).get(
+            f"/api/jobs/{job.id}/artifact", headers={"Range": range_header}
+        )
+
+        assert response.status_code == 416
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.headers["content-range"] == "bytes */8"
+        assert response.content == b""
+    finally:
+        _close_harness(harness)
+
+
 def test_artifact_download_rejects_entry_replaced_by_external_symlink_before_open(
     tmp_path, monkeypatch
 ):
@@ -374,7 +429,7 @@ async def test_artifact_response_closes_pinned_file_immediately_when_send_discon
             "raw_path": b"/api/jobs/artifact",
             "query_string": b"",
             "root_path": "",
-            "headers": [],
+            "headers": [(b"range", b"bytes=0-3")],
             "client": ("test", 123),
             "server": ("testserver", 80),
             "app": app,
@@ -382,6 +437,7 @@ async def test_artifact_response_closes_pinned_file_immediately_when_send_discon
         response = api_module.get_job_artifact(job.id, Request(scope))
         assert opened_artifact is not None
         assert not opened_artifact.closed
+        assert response.status_code == 206
 
         async def receive():
             return {"type": "http.disconnect"}
