@@ -59,5 +59,30 @@ def open_database(path: Path) -> sqlite3.Connection:
         )
         connection.execute("INSERT INTO schema_migrations (version) VALUES (1)")
 
+    migration = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = 2"
+    ).fetchone()
+    if migration is None:
+        connection.execute(
+            """
+            CREATE TABLE media_assets (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id),
+              path TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              duration_ms INTEGER,
+              width INTEGER,
+              height INTEGER,
+              codec TEXT,
+              available INTEGER NOT NULL,
+              size_bytes INTEGER NOT NULL,
+              modified_ns INTEGER NOT NULL,
+              fingerprint TEXT NOT NULL,
+              UNIQUE(project_id, path)
+            )
+            """
+        )
+        connection.execute("INSERT INTO schema_migrations (version) VALUES (2)")
+
     connection.commit()
     return connection

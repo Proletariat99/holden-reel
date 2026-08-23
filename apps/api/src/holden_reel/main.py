@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from .api import api_router, register_error_handlers
 from .config import Settings
 from .db import Database, open_database
+from .media import FFprobe, MediaRepository, MediaService
 from .projects import ProjectRepository, ProjectService
 
 
@@ -13,6 +14,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         open_database(app.state.settings.data_dir / "holden-reel.sqlite3")
     )
     app.state.project_service = ProjectService(ProjectRepository(app.state.database))
+    app.state.media_service = MediaService(
+        MediaRepository(app.state.database),
+        app.state.project_service,
+        FFprobe(app.state.settings.ffprobe_bin),
+    )
     register_error_handlers(app)
     app.include_router(api_router)
 
