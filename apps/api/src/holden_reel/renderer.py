@@ -5,7 +5,9 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 import json
 from pathlib import Path
+from queue import Empty, Queue
 import subprocess
+from threading import Thread
 from typing import Protocol
 from uuid import UUID
 
@@ -133,6 +135,7 @@ class Renderer:
     def __init__(self, media: MediaLookup, settings: Settings):
         self.media = media
         self.settings = settings
+        self.data_root = settings.data_dir.resolve()
         self.compiler = FFmpegCompiler(settings.ffmpeg_bin)
 
     def render(
@@ -143,14 +146,18 @@ class Renderer:
         on_progress: Callable[[float], None],
         is_cancelled: Callable[[], bool],
     ) -> RenderResult:
+        _require_supported_profile(profile)
+        _require_path_within_data_root(output_path, self.data_root)
+        partial_path = Path(f"{output_path}.partial.mp4")
+        _require_path_within_data_root(partial_path, self.data_root)
         assets = {asset.id: asset for asset in self.media.list(plan.project_id)}
         _assert_output_not_source(output_path, assets.values())
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        partial_path = Path(f"{output_path}.partial.mp4")
         _assert_output_not_source(partial_path, assets.values())
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         partial_path.unlink(missing_ok=True)
         command = self.compiler.compile(plan, assets, profile, partial_path)
         process: subprocess.Popen[str] | None = None
+        output_reader: Thread | None = None
         last_progress = 0.0
         diagnostics: list[str] = []
         on_progress(last_progress)
@@ -166,7 +173,26 @@ class Renderer:
             )
             if process.stdout is None:
                 raise RuntimeError("FFmpeg progress pipe was unavailable")
-            for line in process.stdout:
+            output_messages: Queue[str | BaseException | None] = Queue()
+            output_reader = Thread(
+                target=_drain_process_output,
+                args=(process.stdout, output_messages),
+                name="holden-reel-ffmpeg-output",
+            )
+            output_reader.start()
+            while True:
+                if is_cancelled():
+                    _stop_process(process)
+                    raise RenderCancelled("Render was cancelled")
+                try:
+                    message = output_messages.get(timeout=0.05)
+                except Empty:
+                    continue
+                if message is None:
+                    break
+                if isinstance(message, BaseException):
+                    raise RuntimeError("Failed to read FFmpeg output") from message
+                line = message
                 progress = _parse_progress(line, plan.duration_ms)
                 if progress is None:
                     if stripped := line.strip():
@@ -194,6 +220,9 @@ class Renderer:
                 _stop_process(process)
             partial_path.unlink(missing_ok=True)
             raise
+        finally:
+            if output_reader is not None:
+                output_reader.join()
 
     def verify(
         self,
@@ -201,6 +230,8 @@ class Renderer:
         expected_duration_ms: int,
         profile: RenderProfile,
     ) -> RenderResult:
+        _require_supported_profile(profile)
+        _require_path_within_data_root(output_path, self.data_root)
         completed = subprocess.run(
             [
                 self.settings.ffprobe_bin,
@@ -270,6 +301,17 @@ def _assert_output_not_source(
         raise ValueError("render output must not equal a source path")
 
 
+def _require_supported_profile(profile: RenderProfile) -> None:
+    if profile not in (PREVIEW, FINAL):
+        raise ValueError("render profile must equal the exact PREVIEW or FINAL configuration")
+
+
+def _require_path_within_data_root(path: Path, data_root: Path) -> None:
+    resolved = path.resolve()
+    if resolved == data_root or not resolved.is_relative_to(data_root):
+        raise ValueError("render output must remain within the configured data directory")
+
+
 def _video_filter(index: int, shot: Shot, profile: RenderProfile) -> str:
     if shot.source_start_ms is None or shot.source_end_ms is None:
         raise ValueError("video shots require source ranges")
@@ -324,6 +366,18 @@ def _parse_progress(line: str, duration_ms: int) -> float | None:
     except ValueError:
         return None
     return min(1.0, max(0.0, out_time_microseconds / (duration_ms * 1000)))
+
+
+def _drain_process_output(
+    output: Iterable[str], messages: Queue[str | BaseException | None]
+) -> None:
+    try:
+        for line in output:
+            messages.put(line)
+    except BaseException as error:
+        messages.put(error)
+    finally:
+        messages.put(None)
 
 
 def _stop_process(process: subprocess.Popen[str]) -> None:

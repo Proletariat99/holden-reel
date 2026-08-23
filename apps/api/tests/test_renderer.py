@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 import subprocess
+from threading import Event, Thread
 from uuid import UUID, uuid4
 
 import pytest
@@ -204,6 +205,173 @@ def test_renderer_preserves_source_equal_to_derived_partial_path(
     assert partial.read_bytes() == b"original-source"
 
 
+def test_renderer_rejects_output_outside_configured_data_root(
+    tmp_path, monkeypatch, valid_plan, command_assets
+):
+    """Would fail if a caller could make Renderer create files outside data_dir."""
+    data_root = tmp_path / "data"
+    external_parent = tmp_path / "external" / "nested"
+    output = external_parent / "output.mp4"
+    monkeypatch.setattr(
+        "holden_reel.renderer.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("FFmpeg must not start for an unsafe path"),
+    )
+    renderer = Renderer(
+        StaticMedia(command_assets),
+        Settings(data_dir=data_root, ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
+    )
+
+    with pytest.raises(ValueError, match="configured data directory"):
+        renderer.render(valid_plan, PREVIEW, output, lambda _: None, lambda: False)
+
+    assert not external_parent.exists()
+
+
+def test_renderer_rejects_output_through_symlink_parent(
+    tmp_path, monkeypatch, valid_plan, command_assets
+):
+    """Would fail if a symlink parent redirected renderer output outside data_dir."""
+    data_root = tmp_path / "data"
+    external = tmp_path / "external"
+    data_root.mkdir()
+    external.mkdir()
+    (data_root / "redirect").symlink_to(external, target_is_directory=True)
+    output = data_root / "redirect" / "nested" / "output.mp4"
+    monkeypatch.setattr(
+        "holden_reel.renderer.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("FFmpeg must not start for an unsafe path"),
+    )
+    renderer = Renderer(
+        StaticMedia(command_assets),
+        Settings(data_dir=data_root, ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
+    )
+
+    with pytest.raises(ValueError, match="configured data directory"):
+        renderer.render(valid_plan, PREVIEW, output, lambda _: None, lambda: False)
+
+    assert list(external.iterdir()) == []
+
+
+def test_renderer_rejects_derived_partial_symlink_escape(
+    tmp_path, monkeypatch, valid_plan, command_assets
+):
+    """Would fail if the derived partial path bypassed canonical containment."""
+    data_root = tmp_path / "data"
+    external = tmp_path / "external"
+    data_root.mkdir()
+    external.mkdir()
+    output = data_root / "output.mp4"
+    partial = Path(f"{output}.partial.mp4")
+    partial.symlink_to(external / "partial.mp4")
+    monkeypatch.setattr(
+        "holden_reel.renderer.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("FFmpeg must not start for an unsafe partial"),
+    )
+    renderer = Renderer(
+        StaticMedia(command_assets),
+        Settings(data_dir=data_root, ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
+    )
+
+    with pytest.raises(ValueError, match="configured data directory"):
+        renderer.render(valid_plan, PREVIEW, output, lambda _: None, lambda: False)
+
+    assert partial.is_symlink()
+    assert list(external.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        replace(PREVIEW, width=541),
+        replace(PREVIEW, fps=24),
+        replace(PREVIEW, video_codec="mpeg4"),
+        replace(PREVIEW, audio_codec="mp3"),
+        replace(PREVIEW, crf=27),
+    ],
+    ids=["dimensions", "fps", "video-codec", "audio-codec", "crf"],
+)
+def test_renderer_rejects_altered_profile_before_spawning(
+    tmp_path, monkeypatch, valid_plan, command_assets, profile
+):
+    """Would fail if caller-defined encoding settings reached FFmpeg."""
+    output = tmp_path / "data" / "output.mp4"
+    monkeypatch.setattr(
+        "holden_reel.renderer.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("FFmpeg must not start for an altered profile"),
+    )
+    renderer = Renderer(
+        StaticMedia(command_assets),
+        Settings(data_dir=tmp_path / "data", ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
+    )
+
+    with pytest.raises(ValueError, match="exact PREVIEW or FINAL"):
+        renderer.render(valid_plan, profile, output, lambda _: None, lambda: False)
+
+    assert not output.parent.exists()
+
+
+def test_verify_rejects_altered_profile_before_probing(
+    tmp_path, monkeypatch, command_assets
+):
+    """Would fail if verification trusted caller-defined technical expectations."""
+    monkeypatch.setattr(
+        "holden_reel.renderer.subprocess.run",
+        lambda *args, **kwargs: pytest.fail("FFprobe must not run for an altered profile"),
+    )
+    renderer = Renderer(
+        StaticMedia(command_assets),
+        Settings(data_dir=tmp_path, ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
+    )
+
+    with pytest.raises(ValueError, match="exact PREVIEW or FINAL"):
+        renderer.verify(tmp_path / "output.mp4", 15_000, replace(FINAL, crf=17))
+
+
+def test_renderer_cancels_while_ffmpeg_emits_no_progress(
+    tmp_path, monkeypatch, valid_plan, command_assets
+):
+    """Would fail if cancellation waited for FFmpeg to emit a progress record."""
+    output = tmp_path / "output.mp4"
+    partial = Path(f"{output}.partial.mp4")
+    process = _NoProgressProcess(partial)
+    monkeypatch.setattr(
+        "holden_reel.renderer.subprocess.Popen", lambda *args, **kwargs: process
+    )
+    renderer = Renderer(
+        StaticMedia(command_assets),
+        Settings(data_dir=tmp_path, ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
+    )
+    errors: list[BaseException] = []
+    finished = Event()
+
+    def run_render() -> None:
+        try:
+            renderer.render(valid_plan, PREVIEW, output, lambda _: None, lambda: True)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    render_thread = Thread(target=run_render, name="test-no-progress-render")
+    render_thread.start()
+    try:
+        assert finished.wait(1), "renderer did not poll cancellation without progress"
+    finally:
+        if not finished.is_set():
+            process.force_stop()
+            assert finished.wait(1), "test cleanup could not stop renderer"
+        render_thread.join(timeout=1)
+
+    assert not render_thread.is_alive()
+    assert process.output.ended.is_set()
+    assert process.terminated
+    assert process.killed
+    assert process.wait_timeouts == [5]
+    assert len(errors) == 1
+    assert isinstance(errors[0], RenderCancelled)
+    assert not partial.exists()
+
+
 def test_renderer_reports_progress_and_escalates_cancel_to_kill(
     tmp_path, monkeypatch, valid_plan, command_assets
 ):
@@ -223,9 +391,16 @@ def test_renderer_reports_progress_and_escalates_cancel_to_kill(
         Settings(data_dir=tmp_path, ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
     )
     progress = []
+    cancellation_checks = iter([False, True])
 
     with pytest.raises(RenderCancelled):
-        renderer.render(valid_plan, PREVIEW, output, progress.append, lambda: True)
+        renderer.render(
+            valid_plan,
+            PREVIEW,
+            output,
+            progress.append,
+            lambda: next(cancellation_checks),
+        )
 
     assert progress == [0.0, 0.5]
     assert process.terminated
@@ -296,18 +471,42 @@ def test_real_render_is_verified_atomic_and_preserves_sources(
     assert {name: _sha256(path) for name, path in media_fixture.paths.items()} == before_hashes
 
 
-def test_verify_rejects_wrong_frame_rate(tmp_path, media_fixture, ffmpeg_bins, valid_plan):
+def test_verify_rejects_wrong_frame_rate(tmp_path, ffmpeg_bins, command_assets):
     """Would fail if technical verification ignored the profile frame rate."""
     ffmpeg, ffprobe = ffmpeg_bins
     renderer = Renderer(
-        StaticMedia(_fixture_assets(media_fixture.paths)),
+        StaticMedia(command_assets),
         Settings(data_dir=tmp_path, ffmpeg_bin=ffmpeg, ffprobe_bin=ffprobe),
     )
-    output = tmp_path / "preview.mp4"
-    renderer.render(valid_plan, PREVIEW, output, lambda _: None, lambda: False)
+    output = tmp_path / "24-fps.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=540x960:r=24:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        shell=False,
+    )
 
     with pytest.raises(RuntimeError, match="frame rate"):
-        renderer.verify(output, 15_000, replace(PREVIEW, fps=24))
+        renderer.verify(output, 1_000, PREVIEW)
 
 
 def _asset(
@@ -389,6 +588,49 @@ class _FailedProcess:
 
     def wait(self, timeout=None):
         return self.returncode
+
+
+class _NoProgressProcess:
+    def __init__(self, partial: Path):
+        partial.write_bytes(b"incomplete")
+        self.output = _BlockingOutput()
+        self.stdout = self.output
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+        self.wait_timeouts = []
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self.output.release.set()
+
+    def wait(self, timeout=None):
+        if self.terminated and not self.killed:
+            self.wait_timeouts.append(timeout)
+            raise subprocess.TimeoutExpired("ffmpeg", timeout)
+        return self.returncode
+
+    def force_stop(self):
+        self.returncode = -9
+        self.output.release.set()
+
+
+class _BlockingOutput:
+    def __init__(self):
+        self.release = Event()
+        self.ended = Event()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.release.wait()
+        self.ended.set()
+        raise StopIteration
 
 
 class _TextStream:
