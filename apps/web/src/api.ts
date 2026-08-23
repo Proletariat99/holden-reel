@@ -1,4 +1,13 @@
-import type { ApiClient as ApiClientContract, ErrorResponse, MediaCollection, Project } from "./types";
+import type {
+  ApiClient as ApiClientContract,
+  ComposePlanRequest,
+  ErrorResponse,
+  MediaCollection,
+  Project,
+  ReelPlan,
+  RenderJob,
+  RenderProfile,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -57,11 +66,39 @@ export class ApiClient implements ApiClientContract {
     return this.request<MediaCollection>(`/api/projects/${encodeURIComponent(projectId)}/media`);
   }
 
-  private async request<T>(path: string, init: { method?: string; body?: object } = {}): Promise<T> {
+  async composePlan(projectId: string, body: ComposePlanRequest): Promise<ReelPlan> {
+    return this.request<ReelPlan>(`/api/projects/${encodeURIComponent(projectId)}/plans/compose`, {
+      method: "POST",
+      body,
+    });
+  }
+
+  async startRender(planId: string, profile: RenderProfile): Promise<RenderJob> {
+    return this.request<RenderJob>(`/api/plans/${encodeURIComponent(planId)}/renders`, {
+      method: "POST",
+      body: { profile },
+    });
+  }
+
+  async getJob(jobId: string, signal?: AbortSignal): Promise<RenderJob> {
+    return this.request<RenderJob>(`/api/jobs/${encodeURIComponent(jobId)}`, { signal });
+  }
+
+  async cancelJob(jobId: string): Promise<RenderJob> {
+    return this.request<RenderJob>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    });
+  }
+
+  private async request<T>(
+    path: string,
+    init: { method?: string; body?: object; signal?: AbortSignal } = {},
+  ): Promise<T> {
     const response = await fetch(path, {
       method: init.method ?? "GET",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      signal: init.signal,
     });
     const payload: unknown = await response.json();
 
@@ -76,4 +113,8 @@ export class ApiClient implements ApiClientContract {
 
     return payload as T;
   }
+}
+
+export function artifactUrl(jobId: string): string {
+  return `/api/jobs/${encodeURIComponent(jobId)}/artifact`;
 }

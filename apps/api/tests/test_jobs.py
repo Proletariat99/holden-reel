@@ -8,8 +8,10 @@ import time
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from holden_reel.api import api_router, register_error_handlers
 from holden_reel.artifacts import ArtifactStore
 from holden_reel.config import Settings
 from holden_reel.db import Database, open_database
@@ -202,6 +204,98 @@ def _wait_for_terminal_job(service: JobService, job_id: UUID, timeout=WAIT_SECON
 def _close_harness(harness: ServiceHarness) -> None:
     harness.service.close()
     harness.connection.close()
+
+
+def _artifact_client(harness: ServiceHarness) -> TestClient:
+    app = FastAPI()
+    app.state.job_service = harness.service
+    app.state.settings = Settings(data_dir=harness.data_dir)
+    register_error_handlers(app)
+    app.include_router(api_router)
+    return TestClient(app)
+
+
+def test_artifact_download_rejects_a_job_that_has_not_succeeded(tmp_path):
+    """Would fail if knowing an active job ID authorized artifact access."""
+    renderer = BlockingRenderer()
+    harness = _make_harness(tmp_path, renderer)
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        assert renderer.started.wait(WAIT_SECONDS), "worker did not start fake render"
+
+        response = _artifact_client(harness).get(f"/api/jobs/{job.id}/artifact")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "error": {
+                "code": "artifact_not_ready",
+                "message": "Render artifact is not ready",
+                "details": {},
+            }
+        }
+    finally:
+        renderer.release.set()
+        _wait_for_terminal_job(harness.service, job.id)
+        _close_harness(harness)
+
+
+def test_artifact_download_rejects_a_missing_file(tmp_path):
+    """Would fail if stale succeeded-job metadata were treated as a downloadable file."""
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        finished = _wait_for_terminal_job(harness.service, job.id)
+        Path(finished.artifact_path).unlink()
+
+        response = _artifact_client(harness).get(f"/api/jobs/{job.id}/artifact")
+
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "artifact_missing"
+    finally:
+        _close_harness(harness)
+
+
+def test_artifact_download_rejects_a_persisted_path_outside_the_data_root(tmp_path):
+    """Would fail if traversal in persisted job metadata escaped the configured data root."""
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        _wait_for_terminal_job(harness.service, job.id)
+        outside = tmp_path / "outside.mp4"
+        outside.write_bytes(b"private file")
+        with harness.database.transaction() as connection:
+            connection.execute(
+                "UPDATE jobs SET artifact_path = ? WHERE id = ?",
+                (str(harness.data_dir / ".." / outside.name), str(job.id)),
+            )
+
+        response = _artifact_client(harness).get(f"/api/jobs/{job.id}/artifact")
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "unsafe_artifact_path"
+        assert response.content != outside.read_bytes()
+    finally:
+        _close_harness(harness)
+
+
+def test_artifact_download_returns_mp4_with_a_server_generated_safe_filename(tmp_path):
+    """Would fail if a valid succeeded artifact could not be previewed or leaked its stored path."""
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        _wait_for_terminal_job(harness.service, job.id)
+
+        response = _artifact_client(harness).get(f"/api/jobs/{job.id}/artifact")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "video/mp4"
+        assert response.headers["content-disposition"] == (
+            f'attachment; filename="holden-reel-preview-{job.id}.mp4"'
+        )
+        assert response.content == b"fake mp4"
+        assert str(harness.data_dir) not in response.headers["content-disposition"]
+    finally:
+        _close_harness(harness)
 
 
 def test_render_job_persists_queued_running_and_succeeded(tmp_path):

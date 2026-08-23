@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { ApiClient } from "./api";
+import { DraftWorkspace } from "./features/draft/DraftWorkspace";
 import { MediaImport } from "./features/import/MediaImport";
 import { ProjectStart } from "./features/projects/ProjectStart";
 import type { MediaSelection, Project } from "./types";
@@ -20,10 +21,11 @@ export default function App() {
         {project ? <p className="muted">{project.name}</p> : null}
       </header>
       {project ? (
-        <>
+        selection ? (
+          <DraftWorkspace api={api} project={project} selection={selection} />
+        ) : (
           <MediaImport api={api} project={project} onReady={setSelection} />
-          {selection ? <p className="success-message" role="status">Sources selected. Your reel is ready for planning.</p> : null}
-        </>
+        )
       ) : (
         <ProjectStart api={api} onOpen={setProject} />
       )}

@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, FastAPI, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -115,6 +115,49 @@ def submit_render(
 @api_router.get("/jobs/{job_id}", response_model=Job)
 def get_job(job_id: UUID, request: Request) -> Job:
     return job_service(request).get(job_id)
+
+
+@api_router.get("/jobs/{job_id}/artifact", response_class=FileResponse)
+def get_job_artifact(job_id: UUID, request: Request) -> FileResponse:
+    job = job_service(request).get(job_id)
+    if job.status != "succeeded":
+        raise DomainError(
+            "artifact_not_ready",
+            "Render artifact is not ready",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    if job.artifact_path is None:
+        raise DomainError(
+            "artifact_missing",
+            "Render artifact is missing",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    data_root = request.app.state.settings.data_dir.resolve()
+    artifact = Path(job.artifact_path)
+    resolved_artifact = artifact.resolve()
+    if (
+        resolved_artifact == data_root
+        or not resolved_artifact.is_relative_to(data_root)
+        or resolved_artifact.suffix.lower() != ".mp4"
+    ):
+        raise DomainError(
+            "unsafe_artifact_path",
+            "Render artifact path is unsafe",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    if not resolved_artifact.is_file():
+        raise DomainError(
+            "artifact_missing",
+            "Render artifact is missing",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    return FileResponse(
+        resolved_artifact,
+        media_type="video/mp4",
+        filename=f"holden-reel-{job.kind}-{job.id}.mp4",
+    )
 
 
 @api_router.post("/jobs/{job_id}/cancel", response_model=Job)
