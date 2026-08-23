@@ -102,5 +102,29 @@ def open_database(path: Path) -> sqlite3.Connection:
         )
         connection.execute("INSERT INTO schema_migrations (version) VALUES (3)")
 
+    migration = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = 4"
+    ).fetchone()
+    if migration is None:
+        connection.execute(
+            """
+            CREATE TABLE jobs (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id),
+              kind TEXT NOT NULL CHECK (kind IN ('preview', 'final')),
+              status TEXT NOT NULL CHECK (
+                status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')
+              ),
+              progress REAL NOT NULL CHECK (progress >= 0.0 AND progress <= 1.0),
+              plan_id TEXT NOT NULL REFERENCES reel_plans(id),
+              artifact_path TEXT,
+              error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("INSERT INTO schema_migrations (version) VALUES (4)")
+
     connection.commit()
     return connection

@@ -1,7 +1,8 @@
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, FastAPI, Request, status
+from fastapi import APIRouter, FastAPI, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -9,6 +10,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .errors import DomainError
+from .jobs import Job, JobService
 from .media import MediaAsset, MediaService
 from .plans import ComposePlanRequest, PlanService, ReelPlan
 from .projects import Project, ProjectService
@@ -20,6 +22,10 @@ class CreateProjectRequest(BaseModel):
 
 class ImportMediaRequest(BaseModel):
     path: str
+
+
+class SubmitRenderRequest(BaseModel):
+    profile: Literal["preview", "final"]
 
 
 api_router = APIRouter(prefix="/api")
@@ -35,6 +41,10 @@ def media_service(request: Request) -> MediaService:
 
 def plan_service(request: Request) -> PlanService:
     return request.app.state.plan_service
+
+
+def job_service(request: Request) -> JobService:
+    return request.app.state.job_service
 
 
 @api_router.post("/projects", response_model=Project, status_code=status.HTTP_201_CREATED)
@@ -84,6 +94,32 @@ def compose_plan(
 @api_router.get("/plans/{plan_id}", response_model=ReelPlan)
 def get_plan(plan_id: UUID, request: Request) -> ReelPlan:
     return plan_service(request).get(plan_id)
+
+
+@api_router.post(
+    "/plans/{plan_id}/renders",
+    response_model=Job,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def submit_render(
+    plan_id: UUID,
+    payload: SubmitRenderRequest,
+    request: Request,
+    response: Response,
+) -> Job:
+    job = job_service(request).submit_render(plan_id, payload.profile)
+    response.headers["Location"] = f"/api/jobs/{job.id}"
+    return job
+
+
+@api_router.get("/jobs/{job_id}", response_model=Job)
+def get_job(job_id: UUID, request: Request) -> Job:
+    return job_service(request).get(job_id)
+
+
+@api_router.post("/jobs/{job_id}/cancel", response_model=Job)
+def cancel_job(job_id: UUID, request: Request) -> Job:
+    return job_service(request).cancel(job_id)
 
 
 def register_error_handlers(app: FastAPI) -> None:
