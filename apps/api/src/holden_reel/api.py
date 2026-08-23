@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .errors import DomainError
 from .media import MediaAsset, MediaService
+from .plans import ComposePlanRequest, PlanService, ReelPlan
 from .projects import Project, ProjectService
 
 
@@ -30,6 +31,10 @@ def project_service(request: Request) -> ProjectService:
 
 def media_service(request: Request) -> MediaService:
     return request.app.state.media_service
+
+
+def plan_service(request: Request) -> PlanService:
+    return request.app.state.plan_service
 
 
 @api_router.post("/projects", response_model=Project, status_code=status.HTTP_201_CREATED)
@@ -63,6 +68,22 @@ def import_media(
 )
 def list_media(project_id: UUID, request: Request) -> dict[str, list[MediaAsset]]:
     return {"assets": media_service(request).list(project_id)}
+
+
+@api_router.post(
+    "/projects/{project_id}/plans/compose",
+    response_model=ReelPlan,
+    status_code=status.HTTP_201_CREATED,
+)
+def compose_plan(
+    project_id: UUID, payload: ComposePlanRequest, request: Request
+) -> ReelPlan:
+    return plan_service(request).compose(project_id, payload)
+
+
+@api_router.get("/plans/{plan_id}", response_model=ReelPlan)
+def get_plan(plan_id: UUID, request: Request) -> ReelPlan:
+    return plan_service(request).get(plan_id)
 
 
 def register_error_handlers(app: FastAPI) -> None:

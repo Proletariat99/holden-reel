@@ -4,6 +4,7 @@ from .api import api_router, register_error_handlers
 from .config import Settings
 from .db import Database, open_database
 from .media import FFprobe, MediaRepository, MediaService
+from .plans import PlanRepository, PlanService
 from .projects import ProjectRepository, ProjectService
 
 
@@ -18,6 +19,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         MediaRepository(app.state.database),
         app.state.project_service,
         FFprobe(app.state.settings.ffprobe_bin),
+    )
+    app.state.plan_service = PlanService(
+        PlanRepository(app.state.database),
+        app.state.project_service,
+        app.state.media_service,
     )
     register_error_handlers(app)
     app.include_router(api_router)

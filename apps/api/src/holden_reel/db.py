@@ -84,5 +84,23 @@ def open_database(path: Path) -> sqlite3.Connection:
         )
         connection.execute("INSERT INTO schema_migrations (version) VALUES (2)")
 
+    migration = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = 3"
+    ).fetchone()
+    if migration is None:
+        connection.execute(
+            """
+            CREATE TABLE reel_plans (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id),
+              version INTEGER NOT NULL,
+              plan_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              UNIQUE(project_id, version)
+            )
+            """
+        )
+        connection.execute("INSERT INTO schema_migrations (version) VALUES (3)")
+
     connection.commit()
     return connection
