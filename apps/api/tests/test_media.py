@@ -1,3 +1,5 @@
+import hashlib
+import os
 from pathlib import Path
 
 from holden_reel.media import FFprobe
@@ -48,6 +50,39 @@ def test_import_folder_catalogs_supported_media_without_copying(client, media_fi
         name: (path.stat().st_size, path.stat().st_mtime_ns)
         for name, path in media_fixture.paths.items()
     } == original_stats
+
+
+def test_reimport_refreshes_path_size_mtime_fingerprint(client, media_fixture):
+    """Would fail if fingerprints omitted source metadata or used file contents."""
+    project = client.post("/api/projects", json={"name": "Fixture"}).json()
+    source = media_fixture.paths["red.mp4"]
+    url = f"/api/projects/{project['id']}/media/import"
+
+    initial = client.post(url, json={"path": str(source)})
+    initial_stat = source.stat()
+    expected_initial = hashlib.sha256(
+        f"{source.resolve()}\0{initial_stat.st_size}\0{initial_stat.st_mtime_ns}".encode("utf-8")
+    ).hexdigest()
+
+    assert initial.status_code == 201
+    initial_asset = initial.json()["assets"][0]
+    assert initial_asset["fingerprint"] == expected_initial
+
+    os.utime(
+        source,
+        ns=(initial_stat.st_atime_ns, initial_stat.st_mtime_ns + 1_000_000_000),
+    )
+    updated = client.post(url, json={"path": str(source)})
+    updated_stat = source.stat()
+    expected_updated = hashlib.sha256(
+        f"{source.resolve()}\0{updated_stat.st_size}\0{updated_stat.st_mtime_ns}".encode("utf-8")
+    ).hexdigest()
+
+    assert updated.status_code == 201
+    updated_asset = updated.json()["assets"][0]
+    assert updated_asset["id"] == initial_asset["id"]
+    assert updated_asset["fingerprint"] == expected_updated
+    assert updated_asset["fingerprint"] != initial_asset["fingerprint"]
 
 
 def test_import_missing_path_returns_not_found_error(client, tmp_path):
