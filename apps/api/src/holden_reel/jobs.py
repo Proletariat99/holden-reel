@@ -155,6 +155,12 @@ class JobRepository:
                 (_dump_error(error), datetime.now(UTC).isoformat()),
             )
 
+    def list_running(self) -> list[Job]:
+        rows = self.database.fetch_all(
+            "SELECT * FROM jobs WHERE status = 'running' ORDER BY rowid"
+        )
+        return [self._to_job(row) for row in rows]
+
     def _transition(
         self,
         job_id: UUID,
@@ -230,7 +236,7 @@ class JobService:
         self._events: dict[UUID, Event] = {}
         self._lock = Lock()
         self._closed = False
-        self.repository.recover_running()
+        self._recover_running()
 
     def submit_render(self, plan_id: UUID, profile: str) -> Job:
         render_profile = _PROFILE_BY_NAME.get(profile)
@@ -304,6 +310,19 @@ class JobService:
         self.repository.cancel_active()
         self._executor.shutdown(wait=False, cancel_futures=True)
 
+    def _recover_running(self) -> None:
+        data_root = self.artifacts.data_dir.resolve()
+        for job in self.repository.list_running():
+            try:
+                output_path = self.artifacts.path_for(
+                    job.project_id, job.kind, job.id, ".mp4"
+                )
+            except ValueError:
+                continue
+            _unlink_if_contained(output_path, data_root)
+            _unlink_if_contained(Path(f"{output_path}.partial.mp4"), data_root)
+        self.repository.recover_running()
+
     def _run(
         self,
         job_id: UUID,
@@ -366,3 +385,10 @@ class JobService:
 
 def _dump_error(error: JobError | None) -> str | None:
     return error.model_dump_json() if error is not None else None
+
+
+def _unlink_if_contained(path: Path, data_root: Path) -> None:
+    resolved = path.resolve()
+    if resolved == data_root or not resolved.is_relative_to(data_root):
+        return
+    path.unlink(missing_ok=True)

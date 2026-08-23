@@ -411,6 +411,99 @@ def test_startup_recovery_fails_stale_running_job(tmp_path):
         initial.connection.close()
 
 
+def test_startup_recovery_removes_only_expected_stale_render_outputs(tmp_path):
+    """Would fail if recovery left crash outputs or trusted arbitrary stored paths."""
+    initial = _make_harness(tmp_path, ImmediateRenderer())
+    published_job_id = uuid4()
+    partial_job_id = uuid4()
+    published_output = (
+        initial.data_dir
+        / "projects"
+        / str(initial.plan.project_id)
+        / "previews"
+        / f"{published_job_id}.mp4"
+    )
+    intended_partial_output = (
+        initial.data_dir
+        / "projects"
+        / str(initial.plan.project_id)
+        / "exports"
+        / f"{partial_job_id}.mp4"
+    )
+    partial_output = Path(f"{intended_partial_output}.partial.mp4")
+    source_sentinel = initial.data_dir / "source-media" / "original.mp4"
+    external_sentinel = tmp_path / "external-sentinel.mp4"
+    try:
+        initial.service.close()
+        published_output.parent.mkdir(parents=True)
+        intended_partial_output.parent.mkdir(parents=True)
+        source_sentinel.parent.mkdir(parents=True)
+        published_output.write_bytes(b"published before database transition")
+        partial_output.write_bytes(b"partial before atomic publication")
+        source_sentinel.write_bytes(b"original source")
+        external_sentinel.write_bytes(b"external file")
+        with initial.database.transaction() as connection:
+            connection.executemany(
+                """
+                INSERT INTO jobs (
+                  id, project_id, kind, status, progress, plan_id,
+                  artifact_path, error, created_at, updated_at
+                ) VALUES (?, ?, ?, 'running', 0.4, ?, ?, NULL,
+                          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                [
+                    (
+                        str(published_job_id),
+                        str(initial.plan.project_id),
+                        "preview",
+                        str(initial.plan.id),
+                        str(source_sentinel),
+                    ),
+                    (
+                        str(partial_job_id),
+                        str(initial.plan.project_id),
+                        "final",
+                        str(initial.plan.id),
+                        str(external_sentinel),
+                    ),
+                ],
+            )
+
+        recovered = JobService(
+            initial.database,
+            PlanService(
+                PlanRepository(initial.database),
+                ProjectService(ProjectRepository(initial.database)),
+                MediaService(
+                    MediaRepository(initial.database),
+                    ProjectService(ProjectRepository(initial.database)),
+                    FFprobe("unused-ffprobe"),
+                ),
+            ),
+            ImmediateRenderer(),
+            ArtifactStore(initial.data_dir),
+        )
+        try:
+            published_job = recovered.get(published_job_id)
+            partial_job = recovered.get(partial_job_id)
+
+            assert not published_output.exists()
+            assert not partial_output.exists()
+            assert source_sentinel.read_bytes() == b"original source"
+            assert external_sentinel.read_bytes() == b"external file"
+            assert published_job.status == partial_job.status == "failed"
+            assert published_job.artifact_path is partial_job.artifact_path is None
+            assert published_job.error is not None
+            assert partial_job.error is not None
+            assert published_job.error.code == "application_restarted"
+            assert partial_job.error.code == "application_restarted"
+        finally:
+            recovered.close()
+    finally:
+        initial.service.close()
+        initial.connection.close()
+
+
 def test_job_routes_submit_poll_cancel_and_preserve_error_envelope(tmp_path):
     """Would fail if HTTP job contracts diverged from the persisted service."""
     renderer = BlockingRenderer()
