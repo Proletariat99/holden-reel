@@ -205,7 +205,7 @@ class Renderer:
                     _stop_process(process)
                     raise RenderCancelled("Render was cancelled")
 
-            returncode = process.wait()
+            returncode = _wait_for_process(process, is_cancelled)
             if returncode != 0:
                 error = "\n".join(diagnostics)
                 detail = f": {error}" if error else ""
@@ -388,7 +388,26 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("FFmpeg did not exit after being killed") from error
+
+
+def _wait_for_process(
+    process: subprocess.Popen[str], is_cancelled: Callable[[], bool]
+) -> int:
+    while True:
+        if is_cancelled():
+            _stop_process(process)
+            raise RenderCancelled("Render was cancelled")
+        returncode = process.poll()
+        if returncode is not None:
+            return returncode
+        try:
+            return process.wait(timeout=0.05)
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _probe_duration_ms(payload: dict, video: dict, audio: dict) -> int:

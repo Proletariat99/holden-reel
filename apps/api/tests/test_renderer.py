@@ -372,6 +372,59 @@ def test_renderer_cancels_while_ffmpeg_emits_no_progress(
     assert not partial.exists()
 
 
+def test_renderer_cancels_after_output_eof_while_process_remains_running(
+    tmp_path, monkeypatch, valid_plan, command_assets
+):
+    """Would fail if post-EOF process waiting stopped polling cancellation."""
+    output = tmp_path / "output.mp4"
+    partial = Path(f"{output}.partial.mp4")
+    process = _EofRunningProcess(partial)
+    monkeypatch.setattr(
+        "holden_reel.renderer.subprocess.Popen", lambda *args, **kwargs: process
+    )
+    renderer = Renderer(
+        StaticMedia(command_assets),
+        Settings(data_dir=tmp_path, ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe"),
+    )
+    errors: list[BaseException] = []
+    finished = Event()
+
+    def run_render() -> None:
+        try:
+            renderer.render(
+                valid_plan,
+                PREVIEW,
+                output,
+                lambda _: None,
+                process.short_wait_started.is_set,
+            )
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    render_thread = Thread(target=run_render, name="test-eof-running-render")
+    render_thread.start()
+    try:
+        assert finished.wait(1), "renderer blocked after output EOF"
+    finally:
+        if not finished.is_set():
+            process.force_stop()
+            assert finished.wait(1), "test cleanup could not stop renderer"
+        render_thread.join(timeout=1)
+
+    assert not render_thread.is_alive()
+    assert process.output_ended.is_set()
+    assert process.poll_calls >= 1
+    assert process.short_wait_timeouts == [0.05]
+    assert process.terminated
+    assert process.killed
+    assert process.termination_wait_timeouts == [5]
+    assert len(errors) == 1
+    assert isinstance(errors[0], RenderCancelled)
+    assert not partial.exists()
+
+
 def test_renderer_reports_progress_and_escalates_cancel_to_kill(
     tmp_path, monkeypatch, valid_plan, command_assets
 ):
@@ -586,6 +639,9 @@ class _FailedProcess:
         self.stderr = _TextStream("encoder failed")
         self.returncode = 1
 
+    def poll(self):
+        return self.returncode
+
     def wait(self, timeout=None):
         return self.returncode
 
@@ -617,6 +673,60 @@ class _NoProgressProcess:
     def force_stop(self):
         self.returncode = -9
         self.output.release.set()
+
+
+class _EofRunningProcess:
+    def __init__(self, partial: Path):
+        partial.write_bytes(b"incomplete")
+        self.output_ended = Event()
+        self.stdout = _ImmediateEofOutput(self.output_ended)
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+        self.poll_calls = 0
+        self.short_wait_started = Event()
+        self.short_wait_timeouts = []
+        self.termination_wait_timeouts = []
+        self.release_unbounded_wait = Event()
+
+    def poll(self):
+        self.poll_calls += 1
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self.release_unbounded_wait.set()
+
+    def wait(self, timeout=None):
+        if self.killed:
+            return self.returncode
+        if self.terminated:
+            self.termination_wait_timeouts.append(timeout)
+            raise subprocess.TimeoutExpired("ffmpeg", timeout)
+        if timeout is None:
+            self.release_unbounded_wait.wait()
+            return self.returncode
+        self.short_wait_timeouts.append(timeout)
+        self.short_wait_started.set()
+        raise subprocess.TimeoutExpired("ffmpeg", timeout)
+
+    def force_stop(self):
+        self.killed = True
+        self.returncode = -9
+        self.release_unbounded_wait.set()
+
+
+class _ImmediateEofOutput:
+    def __init__(self, ended: Event):
+        self.ended = ended
+
+    def __iter__(self):
+        self.ended.set()
+        return iter(())
 
 
 class _BlockingOutput:
