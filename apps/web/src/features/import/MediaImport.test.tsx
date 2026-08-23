@@ -62,6 +62,16 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   };
 }
 
+function deferred<T>() {
+  let resolve: (value: T) => void;
+  let reject: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve: resolve!, reject: reject! };
+}
+
 it("imports an absolute folder path and shows catalogued media details", async () => {
   // Break caught: a local path does not reach the import API or returned metadata is hidden.
   const api = fakeApi({ listMedia: vi.fn().mockResolvedValue({ assets: [] }) });
@@ -101,10 +111,75 @@ it("keeps Continue disabled until keyboard selection includes audio and visual m
 
   await user.click(continueButton);
   expect(onReady).toHaveBeenCalledWith({
-    assets,
+    assets: assets.filter((asset) => asset.available),
     audioAssetId: "a1",
     visualAssetIds: ["v1"],
   });
+});
+
+it("keeps an imported catalog when the earlier initial load resolves afterward", async () => {
+  // Break caught: a late initial catalog request overwrites the user's newer import result.
+  const initialCatalog = deferred<{ assets: MediaAsset[] }>();
+  const oldAssets = [
+    {
+      ...assets[0],
+      id: "old-audio",
+      path: "/Users/dave/Media/old-song.wav",
+      fingerprint: "old-audio-fingerprint",
+    },
+  ];
+  const user = userEvent.setup();
+  render(
+    <MediaImport
+      api={fakeApi({ listMedia: vi.fn().mockReturnValue(initialCatalog.promise) })}
+      project={project}
+      onReady={vi.fn()}
+    />,
+  );
+
+  await user.type(screen.getByLabelText(/absolute folder path/i), "/Users/dave/Media");
+  await user.click(screen.getByRole("button", { name: /import folder/i }));
+  initialCatalog.resolve({ assets: oldAssets });
+
+  expect(await screen.findByText("song.wav")).toBeInTheDocument();
+  expect(screen.queryByText("old-song.wav")).not.toBeInTheDocument();
+});
+
+it("disables Continue when selected media becomes unavailable or missing after a catalog refresh", async () => {
+  // Break caught: stale selected IDs can advance the workflow after the current catalog no longer supports them.
+  const onReady = vi.fn();
+  const user = userEvent.setup();
+  const initialApi = fakeApi();
+  const { rerender } = render(<MediaImport api={initialApi} project={project} onReady={onReady} />);
+
+  const audioOption = await screen.findByRole("radio", { name: /song.wav/i });
+  await user.click(audioOption);
+  await user.click(screen.getByRole("checkbox", { name: /rehearsal.mp4/i }));
+  const continueButton = screen.getByRole("button", { name: /continue/i });
+  expect(continueButton).toBeEnabled();
+
+  rerender(
+    <MediaImport
+      api={fakeApi({ listMedia: vi.fn().mockResolvedValue({ assets: [assets[0]] }) })}
+      project={project}
+      onReady={onReady}
+    />,
+  );
+
+  await waitFor(() => expect(screen.queryByRole("checkbox", { name: /rehearsal.mp4/i })).not.toBeInTheDocument());
+  expect(continueButton).toBeDisabled();
+  expect(onReady).not.toHaveBeenCalled();
+
+  rerender(
+    <MediaImport
+      api={fakeApi({ listMedia: vi.fn().mockResolvedValue({ assets: [{ ...assets[0], available: false }] }) })}
+      project={project}
+      onReady={onReady}
+    />,
+  );
+
+  await waitFor(() => expect(screen.getByRole("radio", { name: /song.wav/i })).toBeDisabled());
+  expect(continueButton).toBeDisabled();
 });
 
 it("shows import errors and prevents a second submission while importing", async () => {

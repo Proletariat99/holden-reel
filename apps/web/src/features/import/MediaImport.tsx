@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 import type { ApiClient, MediaAsset, MediaSelection, Project } from "../../types";
 
@@ -16,19 +16,22 @@ export function MediaImport({ api, project, onReady }: MediaImportProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
     let isCurrent = true;
+    const generation = ++requestGeneration.current;
+    setIsLoading(true);
     void api
       .listMedia(project.id)
       .then((result) => {
-        if (isCurrent) setAssets(result.assets);
+        if (isCurrent && requestGeneration.current === generation) updateCatalog(result.assets);
       })
       .catch((reason: unknown) => {
-        if (isCurrent) setError(messageFrom(reason));
+        if (isCurrent && requestGeneration.current === generation) setError(messageFrom(reason));
       })
       .finally(() => {
-        if (isCurrent) setIsLoading(false);
+        if (isCurrent && requestGeneration.current === generation) setIsLoading(false);
       });
     return () => {
       isCurrent = false;
@@ -40,17 +43,17 @@ export function MediaImport({ api, project, onReady }: MediaImportProps) {
     const sourcePath = path.trim();
     if (!sourcePath || isImporting) return;
 
+    const generation = ++requestGeneration.current;
     setIsImporting(true);
+    setIsLoading(false);
     setError(null);
     try {
       const result = await api.importMedia(project.id, sourcePath);
-      setAssets(result.assets);
-      setAudioAssetId("");
-      setVisualAssetIds([]);
+      if (requestGeneration.current === generation) updateCatalog(result.assets);
     } catch (reason: unknown) {
-      setError(messageFrom(reason));
+      if (requestGeneration.current === generation) setError(messageFrom(reason));
     } finally {
-      setIsImporting(false);
+      if (requestGeneration.current === generation) setIsImporting(false);
     }
   }
 
@@ -62,7 +65,40 @@ export function MediaImport({ api, project, onReady }: MediaImportProps) {
 
   const audioAssets = assets.filter((asset) => asset.kind === "audio");
   const visualAssets = assets.filter((asset) => asset.kind === "video" || asset.kind === "image");
-  const canContinue = audioAssetId.length > 0 && visualAssetIds.length > 0;
+  const selectedAudio = audioAssets.find((asset) => asset.available && asset.id === audioAssetId);
+  const selectedVisuals = visualAssets.filter(
+    (asset) => asset.available && visualAssetIds.includes(asset.id),
+  );
+  const availableAssets = assets.filter((asset) => asset.available);
+  const canContinue = selectedAudio !== undefined && selectedVisuals.length > 0;
+
+  function updateCatalog(nextAssets: MediaAsset[]) {
+    setAssets(nextAssets);
+    setAudioAssetId((current) =>
+      nextAssets.some((asset) => asset.id === current && asset.kind === "audio" && asset.available)
+        ? current
+        : "",
+    );
+    setVisualAssetIds((current) =>
+      current.filter((id) =>
+        nextAssets.some(
+          (asset) =>
+            asset.id === id &&
+            (asset.kind === "video" || asset.kind === "image") &&
+            asset.available,
+        ),
+      ),
+    );
+  }
+
+  function handleContinue() {
+    if (!selectedAudio || selectedVisuals.length === 0) return;
+    onReady({
+      assets: availableAssets,
+      audioAssetId: selectedAudio.id,
+      visualAssetIds: selectedVisuals.map((asset) => asset.id),
+    });
+  }
 
   return (
     <section className="guided-screen" aria-labelledby="media-import-heading">
@@ -116,7 +152,7 @@ export function MediaImport({ api, project, onReady }: MediaImportProps) {
         className="continue-button"
         type="button"
         disabled={!canContinue}
-        onClick={() => onReady({ assets, audioAssetId, visualAssetIds })}
+        onClick={handleContinue}
       >
         Continue
       </button>
