@@ -27,6 +27,7 @@ test("creates a project and exports a playable, seekable reel", async ({ page })
   expect(fixture.apiUrl).toBe(`http://127.0.0.1:${fixture.apiPort}`);
   expect(fixture.webPort).toBeGreaterThan(0);
   expect(fixture.webPort).not.toBe(4173);
+  expect(fixture.webPort).not.toBe(fixture.apiPort);
   expect(fixture.webUrl).toBe(`http://127.0.0.1:${fixture.webPort}`);
 
   await page.goto(fixture.webUrl);
