@@ -45,7 +45,7 @@ class ReelPlan(BaseModel):
 
 
 class ComposePlanRequest(BaseModel):
-    duration_ms: int
+    duration_ms: Literal[15000, 30000]
     audio_asset_id: UUID
     audio_start_ms: int
     visual_asset_ids: list[UUID]
@@ -72,13 +72,18 @@ class PlanValidator:
         audio_asset = by_id.get(plan.audio.asset_id)
         if audio_asset is not None and audio_asset.kind != "audio":
             violations.append("audio bed must reference an audio asset")
-        if plan.audio.source_start_ms < 0 or plan.audio.source_end_ms < 0 or any(
-            shot.output_start_ms < 0
-            or shot.output_end_ms < 0
-            or (shot.source_start_ms is not None and shot.source_start_ms < 0)
-            or (shot.source_end_ms is not None and shot.source_end_ms < 0)
-            for shot in plan.shots
-        ):
+        times_are_nonnegative = not (
+            plan.audio.source_start_ms < 0
+            or plan.audio.source_end_ms < 0
+            or any(
+                shot.output_start_ms < 0
+                or shot.output_end_ms < 0
+                or (shot.source_start_ms is not None and shot.source_start_ms < 0)
+                or (shot.source_end_ms is not None and shot.source_end_ms < 0)
+                for shot in plan.shots
+            )
+        )
+        if not times_are_nonnegative:
             violations.append("times must be non-negative")
         if plan.audio.source_end_ms <= plan.audio.source_start_ms:
             violations.append("audio source range must have positive duration")
@@ -114,6 +119,15 @@ class PlanValidator:
                     violations.append("video source ranges must have positive duration")
                 elif asset.duration_ms is None or shot.source_end_ms > asset.duration_ms:
                     violations.append("video source ranges must fit asset duration")
+                elif (
+                    times_are_nonnegative
+                    and not gap_found
+                    and (
+                        shot.source_end_ms - shot.source_start_ms
+                        != shot.output_end_ms - shot.output_start_ms
+                    )
+                ):
+                    violations.append("video source range duration must equal output duration")
             elif asset.kind == "image":
                 if shot.source_start_ms is not None or shot.source_end_ms is not None:
                     violations.append("still shots must use null source ranges")

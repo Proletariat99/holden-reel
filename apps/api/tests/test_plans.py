@@ -131,6 +131,32 @@ def test_plan_rejects_video_source_range_beyond_media_duration(valid_plan, asset
     assert error.value.details["violations"] == ["video source ranges must fit asset duration"]
 
 
+def test_plan_rejects_video_source_range_shorter_than_output(valid_plan, assets):
+    """Would fail if rendering had to invent a frame to fill a video shot's output range."""
+    broken = valid_plan.model_copy(deep=True)
+    broken.shots[0].source_end_ms = 7_499
+
+    with pytest.raises(DomainError) as error:
+        PlanValidator().validate(broken, assets)
+
+    assert error.value.details["violations"] == [
+        "video source range duration must equal output duration"
+    ]
+
+
+def test_plan_rejects_video_source_range_longer_than_output(valid_plan, assets):
+    """Would fail if rendering had to make an implicit trim inside a video shot."""
+    broken = valid_plan.model_copy(deep=True)
+    broken.shots[0].source_end_ms = 7_501
+
+    with pytest.raises(DomainError) as error:
+        PlanValidator().validate(broken, assets)
+
+    assert error.value.details["violations"] == [
+        "video source range duration must equal output duration"
+    ]
+
+
 def test_plan_rejects_negative_timeline_or_source_time(valid_plan, assets):
     """Would fail if invalid negative seeks reached rendering."""
     broken = valid_plan.model_copy(deep=True)
@@ -249,3 +275,27 @@ def test_compose_rejects_sources_that_cannot_fill_a_shot(client, media_fixture):
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "insufficient_usable_media"
+
+
+def test_compose_rejects_huge_unsupported_duration_before_composition(client):
+    """Would fail if an unsupported duration could enter the shot-composition loop."""
+    class CompositionMustNotRun:
+        def compose(self, *_):
+            raise AssertionError("PlanService.compose must not run for an invalid request")
+
+    client.app.state.plan_service = CompositionMustNotRun()
+
+    response = client.post(
+        f"/api/projects/{uuid4()}/plans/compose",
+        json={
+            "duration_ms": 1_000_000_000,
+            "audio_asset_id": str(uuid4()),
+            "audio_start_ms": 0,
+            "visual_asset_ids": [str(uuid4())],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.json()["error"]["message"] == "Request validation failed"
+    assert response.json()["error"]["details"]["errors"][0]["loc"] == ["body", "duration_ms"]
