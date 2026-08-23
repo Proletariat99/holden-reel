@@ -84,9 +84,10 @@ export class ApiClient implements ApiClientContract {
     return this.request<RenderJob>(`/api/jobs/${encodeURIComponent(jobId)}`, { signal });
   }
 
-  async cancelJob(jobId: string): Promise<RenderJob> {
+  async cancelJob(jobId: string, signal?: AbortSignal): Promise<RenderJob> {
     return this.request<RenderJob>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: "POST",
+      signal,
     });
   }
 

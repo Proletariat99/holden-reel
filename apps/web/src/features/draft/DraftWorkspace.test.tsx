@@ -137,7 +137,51 @@ it("shows render progress and cancels the active preview", async () => {
   await user.click(screen.getByRole("button", { name: /cancel preview/i }));
 
   await waitFor(() => expect(api.cancelJob).toHaveBeenCalledTimes(1));
-  expect(api.cancelJob).toHaveBeenCalledWith("preview1");
+  expect(api.cancelJob).toHaveBeenCalledWith("preview1", expect.any(AbortSignal));
+});
+
+it("prevents regeneration from abandoning an active preview or final render", async () => {
+  // Break caught: generating again clears active job controls while work remains in the queue.
+  const user = userEvent.setup();
+  const previewRefresh = deferred<RenderJob>();
+  const previewApi = fakeApi({
+    previewJob: renderJob({ status: "running", progress: 0.42 }),
+  });
+  previewApi.getJob = vi.fn().mockReturnValue(previewRefresh.promise);
+  const previewView = render(
+    <DraftWorkspace api={previewApi} project={project} selection={selection} />,
+  );
+  await user.click(screen.getByRole("button", { name: /generate draft/i }));
+  const previewGenerate = screen.getByRole("button", { name: /generate draft/i });
+  expect(previewGenerate).toBeDisabled();
+  previewRefresh.resolve(renderJob({ status: "running", progress: 0.42 }));
+  await screen.findByRole("button", { name: /cancel preview/i });
+
+  expect(previewGenerate).toBeDisabled();
+  await user.click(previewGenerate);
+  expect(previewApi.composePlan).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: /cancel preview/i })).toBeInTheDocument();
+  previewView.unmount();
+
+  const succeededPreview = renderJob({ status: "succeeded", progress: 1 });
+  const runningFinal = renderJob({ id: "final1", kind: "final", status: "running", progress: 0.2 });
+  const finalRefresh = deferred<RenderJob>();
+  const finalApi = fakeApi({ previewJob: succeededPreview, finalJob: runningFinal });
+  finalApi.getJob = vi.fn((jobId: string) =>
+    jobId === "final1" ? finalRefresh.promise : Promise.resolve(succeededPreview),
+  );
+  render(<DraftWorkspace api={finalApi} project={project} selection={selection} />);
+  await user.click(screen.getByRole("button", { name: /generate draft/i }));
+  await user.click(await screen.findByRole("button", { name: /export final/i }));
+  const finalGenerate = screen.getByRole("button", { name: /generate draft/i });
+  expect(finalGenerate).toBeDisabled();
+  finalRefresh.resolve(runningFinal);
+  await screen.findByRole("button", { name: /cancel final export/i });
+
+  expect(finalGenerate).toBeDisabled();
+  await user.click(finalGenerate);
+  expect(finalApi.composePlan).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("button", { name: /cancel final export/i })).toBeInTheDocument();
 });
 
 it("previews the succeeded artifact and exports a separate final job for download", async () => {
@@ -275,4 +319,14 @@ function fakeApi(options: {
       return Promise.resolve(cancelled);
     }),
   };
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void;
+  let reject: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve: resolve!, reject: reject! };
 }

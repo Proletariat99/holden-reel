@@ -33,6 +33,7 @@ export function useJob(api: ApiClient, jobId: string | null) {
 
   useEffect(() => {
     let active = true;
+    let lastJob: RenderJob | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
 
@@ -43,8 +44,13 @@ export function useJob(api: ApiClient, jobId: string | null) {
     };
     stopPolling.current();
     stopPolling.current = stop;
+    cancelController.current?.abort();
+    cancelController.current = null;
+    cancelToken.current = null;
+    cancelInFlight.current = null;
     setJob(null);
     setError(null);
+    setIsCancelling(false);
 
     const targetJobId = jobId;
     if (targetJobId === null) return stop;
@@ -53,6 +59,7 @@ export function useJob(api: ApiClient, jobId: string | null) {
       try {
         const nextJob = await api.getJob(pollJobId, controller.signal);
         if (!active || controller.signal.aborted) return;
+        lastJob = nextJob;
         setJob(nextJob);
         setError(null);
         if (!TERMINAL_STATUSES.has(nextJob.status)) {
@@ -61,6 +68,9 @@ export function useJob(api: ApiClient, jobId: string | null) {
       } catch (reason: unknown) {
         if (!active || controller.signal.aborted) return;
         setError(toError(reason));
+        if (lastJob !== null && !TERMINAL_STATUSES.has(lastJob.status)) {
+          timer = setTimeout(() => void poll(pollJobId), POLL_INTERVAL_MS);
+        }
       }
     }
 
@@ -84,10 +94,12 @@ export function useJob(api: ApiClient, jobId: string | null) {
     cancelToken.current = token;
     const operation = (async () => {
       try {
-        await api.cancelJob(targetJobId);
+        await api.cancelJob(targetJobId, controller.signal);
+        if (controller.signal.aborted || currentJobId.current !== targetJobId) return;
         const refreshed = await api.getJob(targetJobId, controller.signal);
         if (mounted.current && currentJobId.current === targetJobId && !controller.signal.aborted) {
           setJob(refreshed);
+          setError(null);
         }
       } catch (reason: unknown) {
         if (mounted.current && currentJobId.current === targetJobId && !controller.signal.aborted) {

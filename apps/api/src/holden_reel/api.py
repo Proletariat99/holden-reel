@@ -1,12 +1,17 @@
+from collections.abc import Iterator
+import os
 from pathlib import Path
+import stat
+from typing import BinaryIO
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .errors import DomainError
@@ -117,8 +122,8 @@ def get_job(job_id: UUID, request: Request) -> Job:
     return job_service(request).get(job_id)
 
 
-@api_router.get("/jobs/{job_id}/artifact", response_class=FileResponse)
-def get_job_artifact(job_id: UUID, request: Request) -> FileResponse:
+@api_router.get("/jobs/{job_id}/artifact", response_class=StreamingResponse)
+def get_job_artifact(job_id: UUID, request: Request) -> StreamingResponse:
     job = job_service(request).get(job_id)
     if job.status != "succeeded":
         raise DomainError(
@@ -133,36 +138,141 @@ def get_job_artifact(job_id: UUID, request: Request) -> FileResponse:
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
-    data_root = request.app.state.settings.data_dir.resolve()
-    artifact = Path(job.artifact_path)
-    resolved_artifact = artifact.resolve()
-    if (
-        resolved_artifact == data_root
-        or not resolved_artifact.is_relative_to(data_root)
-        or resolved_artifact.suffix.lower() != ".mp4"
-    ):
-        raise DomainError(
-            "unsafe_artifact_path",
-            "Render artifact path is unsafe",
-            status_code=status.HTTP_409_CONFLICT,
-        )
-    if not resolved_artifact.is_file():
-        raise DomainError(
-            "artifact_missing",
-            "Render artifact is missing",
-            status_code=status.HTTP_404_NOT_FOUND,
-        )
-
-    return FileResponse(
-        resolved_artifact,
+    artifact, size = _open_artifact(
+        request.app.state.settings.data_dir, Path(job.artifact_path)
+    )
+    filename = f"holden-reel-{job.kind}-{job.id}.mp4"
+    return StreamingResponse(
+        _stream_file(artifact),
         media_type="video/mp4",
-        filename=f"holden-reel-{job.kind}-{job.id}.mp4",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Length": str(size),
+        },
+        background=BackgroundTask(artifact.close),
     )
 
 
 @api_router.post("/jobs/{job_id}/cancel", response_model=Job)
 def cancel_job(job_id: UUID, request: Request) -> Job:
     return job_service(request).cancel(job_id)
+
+
+def _open_artifact(data_dir: Path, artifact_path: Path) -> tuple[BinaryIO, int]:
+    data_root = Path(os.path.abspath(data_dir))
+    candidate = Path(os.path.abspath(artifact_path))
+    try:
+        relative = candidate.relative_to(data_root)
+    except ValueError:
+        raise _unsafe_artifact_path() from None
+    if not relative.parts or relative.suffix.lower() != ".mp4":
+        raise _unsafe_artifact_path()
+
+    directory_fd = -1
+    file_fd = -1
+    try:
+        directory_fd = _open_verified_root(data_root)
+        for component in relative.parts[:-1]:
+            next_fd = _open_verified_directory(directory_fd, component)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd, size = _open_verified_file(directory_fd, relative.parts[-1])
+        artifact = os.fdopen(file_fd, "rb")
+        file_fd = -1
+        return artifact, size
+    except FileNotFoundError:
+        raise DomainError(
+            "artifact_missing",
+            "Render artifact is missing",
+            status_code=status.HTTP_404_NOT_FOUND,
+        ) from None
+    except _UnsafeArtifact:
+        raise _unsafe_artifact_path() from None
+    except OSError:
+        raise _unsafe_artifact_path() from None
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+
+class _UnsafeArtifact(Exception):
+    pass
+
+
+def _open_verified_root(path: Path) -> int:
+    before = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        raise _UnsafeArtifact
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        _verify_same_inode(before, os.fstat(descriptor), stat.S_ISDIR)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_verified_directory(parent_fd: int, name: str) -> int:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        raise _UnsafeArtifact
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        _verify_same_inode(before, os.fstat(descriptor), stat.S_ISDIR)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_verified_file(parent_fd: int, name: str) -> tuple[int, int]:
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode):
+        raise _UnsafeArtifact
+    descriptor = _open_file_at(parent_fd, name)
+    try:
+        after = os.fstat(descriptor)
+        _verify_same_inode(before, after, stat.S_ISREG)
+        return descriptor, after.st_size
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_file_at(parent_fd: int, name: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(name, flags, dir_fd=parent_fd)
+
+
+def _verify_same_inode(before, after, expected_type) -> None:
+    if (
+        before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or not expected_type(after.st_mode)
+    ):
+        raise _UnsafeArtifact
+
+
+def _stream_file(artifact: BinaryIO, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
+    try:
+        while chunk := artifact.read(chunk_size):
+            yield chunk
+    finally:
+        artifact.close()
+
+
+def _unsafe_artifact_path() -> DomainError:
+    return DomainError(
+        "unsafe_artifact_path",
+        "Render artifact path is unsafe",
+        status_code=status.HTTP_409_CONFLICT,
+    )
 
 
 def register_error_handlers(app: FastAPI) -> None:

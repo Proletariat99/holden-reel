@@ -34,6 +34,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   const audioAsset = assetsById.get(selection.audioAssetId);
 
   async function handleGenerate() {
+    if (previewInFlight || finalInFlight) return;
     const audioStartMs = validateAudioStart(audioStartSeconds, durationMs, audioAsset);
     if (typeof audioStartMs === "string") {
       setActionError(new Error(audioStartMs));
@@ -61,6 +62,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   }
 
   async function startRender(currentPlan: ReelPlan, profile: RenderProfile) {
+    if (profile === "preview" ? previewInFlight : finalInFlight) return;
     setStartingProfile(profile);
     setActionError(null);
     if (profile === "preview") setPreviewJobId(null);
@@ -88,6 +90,9 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
 
   const previewActive = isActive(preview.job);
   const finalActive = isActive(final.job);
+  const previewInFlight =
+    previewJobId !== null && (preview.job?.id !== previewJobId || previewActive);
+  const finalInFlight = finalJobId !== null && (final.job?.id !== finalJobId || finalActive);
 
   return (
     <section className="guided-screen draft-workspace" aria-labelledby="draft-heading">
@@ -167,7 +172,11 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
             </ol>
           </div>
 
-          <button type="button" disabled={isComposing || startingProfile !== null} onClick={() => void handleGenerate()}>
+          <button
+            type="button"
+            disabled={isComposing || startingProfile !== null || previewInFlight || finalInFlight}
+            onClick={() => void handleGenerate()}
+          >
             {isComposing || startingProfile === "preview" ? "Generating draft…" : "Generate draft"}
           </button>
         </section>
@@ -209,7 +218,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
               />
               <button
                 type="button"
-                disabled={startingProfile === "final" || finalActive}
+                disabled={startingProfile === "final" || finalInFlight}
                 onClick={() => void startRender(plan!, "final")}
               >
                 {startingProfile === "final" ? "Starting export…" : "Export final"}

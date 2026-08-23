@@ -130,6 +130,75 @@ it("preserves an ApiError from a polling failure", async () => {
   expect(result.current.error).toBeInstanceOf(ApiError);
 });
 
+it("keeps polling an active job after a transient ApiError", async () => {
+  // Break caught: one temporary request failure permanently strands an otherwise active render.
+  vi.useFakeTimers();
+  const apiError = new ApiError("temporarily_unavailable", "Try again", {});
+  const getJob = vi
+    .fn<ApiClient["getJob"]>()
+    .mockResolvedValueOnce(queuedJob)
+    .mockRejectedValueOnce(apiError)
+    .mockResolvedValueOnce(runningJob)
+    .mockResolvedValueOnce(succeededJob);
+  const api = fakeApi({ getJob });
+  const { result } = renderHook(() => useJob(api, "j1"));
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(800);
+  });
+  expect(result.current.job?.status).toBe("queued");
+  expect(result.current.error).toBe(apiError);
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
+  expect(result.current.job?.status).toBe("succeeded");
+  expect(result.current.error).toBeNull();
+  expect(getJob).toHaveBeenCalledTimes(4);
+});
+
+it("aborts a deferred cancel refresh and resets cancelling when the job id changes", async () => {
+  // Break caught: a cancel started for an old ID leaves the replacement job permanently cancelling.
+  const cancelRequest = deferred<RenderJob>();
+  let cancelSignal: AbortSignal | undefined;
+  const newJob = job({ id: "j2", status: "succeeded", progress: 1, artifact_path: "/data/j2.mp4" });
+  const getJob = vi.fn((jobId: string) =>
+    Promise.resolve(jobId === "j1" ? runningJob : newJob),
+  );
+  const api = fakeApi({
+    getJob,
+    cancelledJob: job({ status: "cancelled" }),
+  });
+  api.cancelJob = vi.fn((_jobId: string, signal?: AbortSignal) => {
+    cancelSignal = signal;
+    return cancelRequest.promise;
+  });
+  const { result, rerender } = renderHook(({ jobId }) => useJob(api, jobId), {
+    initialProps: { jobId: "j1" as string | null },
+  });
+  await act(async () => undefined);
+
+  let cancelPromise: Promise<void>;
+  act(() => {
+    cancelPromise = result.current.cancel();
+  });
+  expect(result.current.isCancelling).toBe(true);
+
+  rerender({ jobId: "j2" });
+  await act(async () => undefined);
+  expect(cancelSignal?.aborted).toBe(true);
+  expect(result.current.isCancelling).toBe(false);
+  expect(result.current.job?.id).toBe("j2");
+
+  cancelRequest.resolve(job({ status: "cancelled" }));
+  await act(async () => {
+    await cancelPromise!;
+  });
+  expect(getJob).toHaveBeenCalledTimes(2);
+  expect(result.current.job?.id).toBe("j2");
+  expect(result.current.isCancelling).toBe(false);
+});
+
 function job(overrides: Partial<RenderJob>): RenderJob {
   return {
     id: "j1",

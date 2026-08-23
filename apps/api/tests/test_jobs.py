@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from threading import Event, Lock
 import sqlite3
@@ -290,10 +291,49 @@ def test_artifact_download_returns_mp4_with_a_server_generated_safe_filename(tmp
         assert response.status_code == 200
         assert response.headers["content-type"] == "video/mp4"
         assert response.headers["content-disposition"] == (
-            f'attachment; filename="holden-reel-preview-{job.id}.mp4"'
+            f'inline; filename="holden-reel-preview-{job.id}.mp4"'
         )
         assert response.content == b"fake mp4"
         assert str(harness.data_dir) not in response.headers["content-disposition"]
+    finally:
+        _close_harness(harness)
+
+
+def test_artifact_download_rejects_entry_replaced_by_external_symlink_before_open(
+    tmp_path, monkeypatch
+):
+    """Would fail if validation and streaming opened the artifact path at different times."""
+    import holden_reel.api as api_module
+
+    harness = _make_harness(tmp_path, ImmediateRenderer())
+    try:
+        job = harness.service.submit_render(harness.plan.id, profile="preview")
+        finished = _wait_for_terminal_job(harness.service, job.id)
+        artifact = Path(finished.artifact_path)
+        external_secret = tmp_path / "external-secret.mp4"
+        external_secret.write_bytes(b"never serve these secret bytes")
+        real_open_file_at = getattr(api_module, "_open_file_at", None)
+
+        def replace_then_open(parent_fd: int, name: str) -> int:
+            artifact.unlink()
+            artifact.symlink_to(external_secret)
+            if real_open_file_at is not None:
+                return real_open_file_at(parent_fd, name)
+            return os.open(name, os.O_RDONLY, dir_fd=parent_fd)
+
+        monkeypatch.setattr(api_module, "_open_file_at", replace_then_open, raising=False)
+
+        response = _artifact_client(harness).get(f"/api/jobs/{job.id}/artifact")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "error": {
+                "code": "unsafe_artifact_path",
+                "message": "Render artifact path is unsafe",
+                "details": {},
+            }
+        }
+        assert external_secret.read_bytes() not in response.content
     finally:
         _close_harness(harness)
 

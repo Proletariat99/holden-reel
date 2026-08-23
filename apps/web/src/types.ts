@@ -41,7 +41,7 @@ export interface ApiClient {
   composePlan(projectId: string, request: ComposePlanRequest): Promise<ReelPlan>;
   startRender(planId: string, profile: RenderProfile): Promise<RenderJob>;
   getJob(jobId: string, signal?: AbortSignal): Promise<RenderJob>;
-  cancelJob(jobId: string): Promise<RenderJob>;
+  cancelJob(jobId: string, signal?: AbortSignal): Promise<RenderJob>;
 }
 
 export interface MediaSelection {
