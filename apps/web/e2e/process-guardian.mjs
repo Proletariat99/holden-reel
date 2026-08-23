@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
-import { atomicWriteJson, defaultIsTreeAlive, registerOwnedGroup, settleRegistrations, signalGroup, terminateOwnedTree } from "./process-guardian-lib.mjs";
+import { atomicWriteJson, createLifecycleGate, defaultIsTreeAlive, registerOwnedGroup, settleRegistrations, signalGroup, terminateOwnedTree } from "./process-guardian-lib.mjs";
 
 const parentPid = Number(process.argv[2]);
 const lifecyclePath = process.argv[3];
@@ -8,13 +8,18 @@ const paths = JSON.parse(process.argv[4]);
 const children = new Map();
 const groups = [];
 const registrations = new Set();
+const lifecycleGate = createLifecycleGate();
 let cleanupPromise;
 
 await atomicWriteJson(lifecyclePath, { groups, paths });
 send({ type: "ready" });
 
 process.on("message", (message) => {
-  if (message?.type === "spawn") void spawnOwned(message);
+  if (message?.type === "spawn") {
+    void lifecycleGate.runSpawn(() => spawnOwned(message)).catch((error) =>
+      send({ type: "spawn-error", id: message.id, error: String(error) }),
+    );
+  }
   if (message?.type === "port") {
     const owned = children.get(message.id);
     if (owned) owned.port = message.port;
@@ -59,7 +64,6 @@ async function spawnOwned(message) {
     finally { registrations.delete(registration); }
     send({ type: "spawned", id: message.id, pid: child.pid });
   } catch (error) {
-    await cleanup();
     send({ type: "spawn-error", id: message.id, error: String(error) });
   }
 }
@@ -69,12 +73,19 @@ function cleanup() {
   return cleanupPromise;
 }
 async function cleanupOwnedResources() {
+  await lifecycleGate.beginCleanup();
   await settleRegistrations(registrations, 5_000);
   const errors = [];
   for (const owned of [...children.values()].reverse()) {
     try { await stopOwned(owned); } catch (error) { errors.push(error); }
   }
   if (errors.length > 0) {
+    const survivingGroups = [...children.values()]
+      .filter(({ child }) => child.pid !== undefined && defaultIsTreeAlive(child.pid));
+    if (process.platform !== "win32" && survivingGroups.length === 0) {
+      await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true })));
+      return;
+    }
     throw new AggregateError(errors, `owned process trees did not terminate: ${errors.map(String).join("; ")}`);
   }
   await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true })));
