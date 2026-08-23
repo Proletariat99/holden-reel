@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 from uuid import UUID
 
 
@@ -35,4 +36,6 @@ class ArtifactStore:
         if not output_path.resolve().is_relative_to(resolved_project_root):
             raise ValueError("artifact path escapes its project directory")
         output_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(project_root, 0o700)
+        os.chmod(output_dir, 0o700)
         return output_path

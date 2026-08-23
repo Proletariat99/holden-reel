@@ -140,7 +140,7 @@ class JobRepository:
                 (datetime.now(UTC).isoformat(),),
             )
 
-    def recover_running(self) -> None:
+    def recover_active(self) -> None:
         error = JobError(
             code="application_restarted",
             message="Render stopped because the application restarted",
@@ -150,14 +150,14 @@ class JobRepository:
                 """
                 UPDATE jobs
                 SET status = 'failed', artifact_path = NULL, error = ?, updated_at = ?
-                WHERE status = 'running'
+                WHERE status IN ('queued', 'running')
                 """,
                 (_dump_error(error), datetime.now(UTC).isoformat()),
             )
 
-    def list_running(self) -> list[Job]:
+    def list_active(self) -> list[Job]:
         rows = self.database.fetch_all(
-            "SELECT * FROM jobs WHERE status = 'running' ORDER BY rowid"
+            "SELECT * FROM jobs WHERE status IN ('queued', 'running') ORDER BY rowid"
         )
         return [self._to_job(row) for row in rows]
 
@@ -236,7 +236,7 @@ class JobService:
         self._events: dict[UUID, Event] = {}
         self._lock = Lock()
         self._closed = False
-        self._recover_running()
+        self._recover_active()
 
     def submit_render(self, plan_id: UUID, profile: str) -> Job:
         render_profile = _PROFILE_BY_NAME.get(profile)
@@ -310,9 +310,9 @@ class JobService:
         self.repository.cancel_active()
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    def _recover_running(self) -> None:
+    def _recover_active(self) -> None:
         data_root = self.artifacts.data_dir.resolve()
-        for job in self.repository.list_running():
+        for job in self.repository.list_active():
             try:
                 output_path = self.artifacts.path_for(
                     job.project_id, job.kind, job.id, ".mp4"
@@ -321,7 +321,7 @@ class JobService:
                 continue
             _unlink_if_contained(output_path, data_root)
             _unlink_if_contained(Path(f"{output_path}.partial.mp4"), data_root)
-        self.repository.recover_running()
+        self.repository.recover_active()
 
     def _run(
         self,

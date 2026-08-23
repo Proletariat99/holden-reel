@@ -36,6 +36,7 @@ export interface ApiClient {
   createProject(name: string): Promise<Project>;
   listProjects(): Promise<Project[]>;
   getProject(projectId: string): Promise<Project>;
+  getPlan(planId: string): Promise<ReelPlan>;
   importMedia(projectId: string, path: string): Promise<MediaCollection>;
   listMedia(projectId: string): Promise<MediaCollection>;
   composePlan(projectId: string, request: ComposePlanRequest): Promise<ReelPlan>;

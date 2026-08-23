@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 from dataclasses import replace
 from pathlib import Path
 import subprocess
@@ -227,6 +228,13 @@ def test_renderer_rejects_output_outside_configured_data_root(
     assert not external_parent.exists()
 
 
+def test_artifact_store_creates_private_project_directories(tmp_path):
+    """Would fail if other local users could replace unpublished render paths."""
+    output = ArtifactStore(tmp_path).path_for(PROJECT_ID, "preview", uuid4(), ".mp4")
+    assert stat.S_IMODE(output.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(output.parent.parent.stat().st_mode) == 0o700
+
+
 def test_renderer_rejects_output_through_symlink_parent(
     tmp_path, monkeypatch, valid_plan, command_assets
 ):
@@ -325,6 +333,16 @@ def test_verify_rejects_altered_profile_before_probing(
 
     with pytest.raises(ValueError, match="exact PREVIEW or FINAL"):
         renderer.verify(tmp_path / "output.mp4", 15_000, replace(FINAL, crf=17))
+
+
+def test_verify_ffprobe_is_cancellable(tmp_path, monkeypatch, command_assets):
+    """Would fail if final verification could hang or ignore cancellation."""
+    process = _ProbeProcess()
+    monkeypatch.setattr("holden_reel.renderer.subprocess.Popen", lambda *a, **kw: process)
+    renderer = Renderer(StaticMedia(command_assets), Settings(data_dir=tmp_path, ffprobe_bin="ffprobe"))
+    with pytest.raises(RenderCancelled):
+        renderer.verify(tmp_path / "output.mp4", 15_000, FINAL, is_cancelled=lambda: True)
+    assert process.terminated
 
 
 def test_renderer_cancels_while_ffmpeg_emits_no_progress(
@@ -629,6 +647,28 @@ class _HungProcess:
         if self.terminated and not self.killed:
             self.wait_timeouts.append(timeout)
             raise subprocess.TimeoutExpired("ffmpeg", timeout)
+        return self.returncode
+
+
+class _ProbeProcess:
+    def __init__(self):
+        self.returncode = None
+        self.terminated = False
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        raise subprocess.TimeoutExpired("ffprobe", timeout)
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        if self.terminated and not self.killed:
+            raise subprocess.TimeoutExpired("ffprobe", timeout)
         return self.returncode
 
 

@@ -58,6 +58,3 @@ def create_app(
         return {"status": "ok", "version": app.version}
 
     return app
-
-
-app = create_app()

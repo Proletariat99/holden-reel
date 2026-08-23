@@ -48,6 +48,10 @@ make dev
 The command keeps the API at <http://127.0.0.1:8000> and the web application at
 <http://127.0.0.1:5173>. Stop both with `Ctrl-C`.
 
+The API is started in Uvicorn factory mode so importing `holden_reel.main` has
+no filesystem or job-recovery side effects; application state is created only
+when the server asks for an app instance.
+
 The first milestone accepts an **absolute local folder path** in the import
 screen. The API catalogs supported files in place; it does not copy or modify
 source media. Create a project, import a folder, choose one audio file and at

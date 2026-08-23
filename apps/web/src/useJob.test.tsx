@@ -259,6 +259,7 @@ function fakeApi(
     createProject: vi.fn(),
     listProjects: vi.fn(),
     getProject: vi.fn(),
+    getPlan: vi.fn(),
     importMedia: vi.fn(),
     listMedia: vi.fn(),
     composePlan: vi.fn(),

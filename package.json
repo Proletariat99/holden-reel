@@ -3,7 +3,7 @@
   "scripts": {
     "dev": "concurrently -k -n api,web -c magenta,cyan \"pnpm dev:api\" \"pnpm dev:web\"",
     "dev:web": "pnpm --dir apps/web dev --host 127.0.0.1",
-    "dev:api": "cd apps/api && uv run uvicorn holden_reel.main:app --app-dir src --reload --host 127.0.0.1 --port 8000",
+    "dev:api": "cd apps/api && uv run uvicorn holden_reel.main:create_app --factory --app-dir src --reload --host 127.0.0.1 --port 8000",
     "test": "pnpm typecheck && pnpm test:web && pnpm test:api",
     "test:e2e": "pnpm --dir apps/web test:e2e",
     "typecheck": "pnpm --dir apps/web exec tsc --noEmit",

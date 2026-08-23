@@ -58,7 +58,7 @@ export default async function globalSetup() {
 
     const api = await startOwnedProcess(
       guardian, "API", python,
-      ["-m", "uvicorn", "holden_reel.main:app", "--app-dir", "src", "--host", "127.0.0.1", "--port", "0"],
+      ["-m", "uvicorn", "holden_reel.main:create_app", "--factory", "--app-dir", "src", "--host", "127.0.0.1", "--port", "0"],
       resolve(repositoryRoot, "apps/api"),
       { HOLDEN_REEL_DATA_DIR: dataRoot, PYTHONPATH: resolve(repositoryRoot, "apps/api/src") },
     );

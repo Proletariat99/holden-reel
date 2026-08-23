@@ -722,6 +722,43 @@ def test_startup_recovery_fails_stale_running_job(tmp_path):
         initial.connection.close()
 
 
+def test_startup_recovery_fails_stale_queued_job(tmp_path):
+    """Would fail if a queued job remained permanently pollable after restart."""
+    initial = _make_harness(tmp_path, ImmediateRenderer())
+    stale_id = uuid4()
+    try:
+        initial.service.close()
+        with initial.database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO jobs (id, project_id, kind, status, progress, plan_id,
+                   artifact_path, error, created_at, updated_at)
+                   VALUES (?, ?, 'preview', 'queued', 0, ?, NULL, NULL,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+                (str(stale_id), str(initial.plan.project_id), str(initial.plan.id)),
+            )
+        projects = ProjectService(ProjectRepository(initial.database))
+        recovered = JobService(
+            initial.database,
+            PlanService(
+                PlanRepository(initial.database),
+                projects,
+                MediaService(MediaRepository(initial.database), projects, FFprobe("unused")),
+            ),
+            ImmediateRenderer(),
+            ArtifactStore(initial.data_dir),
+        )
+        try:
+            job = recovered.get(stale_id)
+            assert job.status == "failed"
+            assert job.artifact_path is None
+            assert job.error is not None and job.error.code == "application_restarted"
+        finally:
+            recovered.close()
+    finally:
+        initial.service.close()
+        initial.connection.close()
+
+
 def test_startup_recovery_removes_only_expected_stale_render_outputs(tmp_path):
     """Would fail if recovery left crash outputs or trusted arbitrary stored paths."""
     initial = _make_harness(tmp_path, ImmediateRenderer())

@@ -55,6 +55,10 @@ export class ApiClient implements ApiClientContract {
     return this.request<Project>(`/api/projects/${encodeURIComponent(projectId)}`);
   }
 
+  async getPlan(planId: string): Promise<ReelPlan> {
+    return this.request<ReelPlan>(`/api/plans/${encodeURIComponent(planId)}`);
+  }
+
   async importMedia(projectId: string, path: string): Promise<MediaCollection> {
     return this.request<MediaCollection>(`/api/projects/${encodeURIComponent(projectId)}/media/import`, {
       method: "POST",

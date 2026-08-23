@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ApiError, artifactUrl } from "../../api";
 import type {
@@ -11,6 +11,7 @@ import type {
   RenderProfile,
 } from "../../types";
 import { useJob } from "../../useJob";
+import { loadActiveWorkspace, saveActiveWorkspace } from "../../workspaceStorage";
 
 interface DraftWorkspaceProps {
   api: ApiClient;
@@ -28,10 +29,58 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   const [isComposing, setIsComposing] = useState(false);
   const [startingProfile, setStartingProfile] = useState<RenderProfile | null>(null);
   const [actionError, setActionError] = useState<Error | null>(null);
+  const [staleMessage, setStaleMessage] = useState<string | null>(null);
+  const restorationStarted = useRef(false);
   const preview = useJob(api, previewJobId);
   const final = useJob(api, finalJobId);
   const assetsById = new Map(selection.assets.map((asset) => [asset.id, asset]));
   const audioAsset = assetsById.get(selection.audioAssetId);
+
+  useEffect(() => {
+    if (restorationStarted.current) return;
+    restorationStarted.current = true;
+    const saved = loadActiveWorkspace();
+    if (!saved || saved.projectId !== project.id || !saved.planId) return;
+    void api.getPlan(saved.planId).then(async (restoredPlan) => {
+      if (restoredPlan.project_id !== project.id) throw new Error("Saved plan belongs to another project");
+      const jobs = await Promise.allSettled([
+        saved.previewJobId ? api.getJob(saved.previewJobId) : Promise.resolve(null),
+        saved.finalJobId ? api.getJob(saved.finalJobId) : Promise.resolve(null),
+      ]);
+      setPlan(restoredPlan);
+      setDurationMs(restoredPlan.duration_ms);
+      setAudioStartSeconds(String(restoredPlan.audio.source_start_ms / 1000));
+      setVisualAssetIds([...new Set(restoredPlan.shots.map((shot) => shot.asset_id))]);
+      const previewJob = jobs[0].status === "fulfilled" ? jobs[0].value : null;
+      const finalJob = jobs[1].status === "fulfilled" ? jobs[1].value : null;
+      const validPreviewId = previewJob?.project_id === project.id && previewJob.plan_id === restoredPlan.id && previewJob.kind === "preview" ? previewJob.id : null;
+      const validFinalId = finalJob?.project_id === project.id && finalJob.plan_id === restoredPlan.id && finalJob.kind === "final" ? finalJob.id : null;
+      setPreviewJobId(validPreviewId);
+      setFinalJobId(validFinalId);
+      saveWorkspace(restoredPlan.id, validPreviewId, validFinalId);
+    }).catch(() => {
+      saveActiveWorkspace({ projectId: project.id, selection });
+      setStaleMessage("The saved render could not be restored. Generate a new draft.");
+    });
+  }, [api, project.id, selection]);
+
+  function saveWorkspace(planId?: string, savedPreviewJobId?: string | null, savedFinalJobId?: string | null) {
+    saveActiveWorkspace({
+      projectId: project.id,
+      selection,
+      ...(planId ? { planId } : {}),
+      ...(savedPreviewJobId ? { previewJobId: savedPreviewJobId } : {}),
+      ...(savedFinalJobId ? { finalJobId: savedFinalJobId } : {}),
+    });
+  }
+
+  function invalidatePlan() {
+    if (plan || previewJobId || finalJobId) setStaleMessage("Settings changed. Generate a new draft before previewing or exporting.");
+    setPlan(null);
+    setPreviewJobId(null);
+    setFinalJobId(null);
+    saveWorkspace();
+  }
 
   async function handleGenerate() {
     if (previewInFlight || finalInFlight) return;
@@ -53,6 +102,8 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
         visual_asset_ids: visualAssetIds,
       });
       setPlan(composed);
+      setStaleMessage(null);
+      saveWorkspace(composed.id);
       await startRender(composed, "preview");
     } catch (reason: unknown) {
       setActionError(toError(reason));
@@ -69,8 +120,13 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
     else setFinalJobId(null);
     try {
       const job = await api.startRender(currentPlan.id, profile);
-      if (profile === "preview") setPreviewJobId(job.id);
-      else setFinalJobId(job.id);
+      if (profile === "preview") {
+        setPreviewJobId(job.id);
+        saveWorkspace(currentPlan.id, job.id, finalJobId);
+      } else {
+        setFinalJobId(job.id);
+        saveWorkspace(currentPlan.id, previewJobId, job.id);
+      }
     } catch (reason: unknown) {
       setActionError(toError(reason));
     } finally {
@@ -81,6 +137,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
   function moveVisual(index: number, offset: -1 | 1) {
     const destination = index + offset;
     if (destination < 0 || destination >= visualAssetIds.length) return;
+    invalidatePlan();
     setVisualAssetIds((current) => {
       const reordered = [...current];
       [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
@@ -110,7 +167,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
                 type="radio"
                 name="duration"
                 checked={durationMs === 15000}
-                onChange={() => setDurationMs(15000)}
+                onChange={() => { invalidatePlan(); setDurationMs(15000); }}
               />
               15 seconds
             </label>
@@ -119,7 +176,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
                 type="radio"
                 name="duration"
                 checked={durationMs === 30000}
-                onChange={() => setDurationMs(30000)}
+                onChange={() => { invalidatePlan(); setDurationMs(30000); }}
               />
               30 seconds
             </label>
@@ -133,7 +190,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
             step="0.1"
             inputMode="decimal"
             value={audioStartSeconds}
-            onChange={(event) => setAudioStartSeconds(event.target.value)}
+            onChange={(event) => { invalidatePlan(); setAudioStartSeconds(event.target.value); }}
           />
 
           <div>
@@ -257,6 +314,7 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
       </div>
 
       {actionError ? <ErrorMessage error={actionError} /> : null}
+      {staleMessage ? <p className="muted" role="status">{staleMessage}</p> : null}
       {preview.error ? <ErrorMessage error={preview.error} /> : null}
       {final.error ? <ErrorMessage error={final.error} /> : null}
     </section>

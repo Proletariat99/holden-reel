@@ -162,6 +162,7 @@ it("prevents regeneration from abandoning an active preview or final render", as
   expect(previewApi.composePlan).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: /cancel preview/i })).toBeInTheDocument();
   previewView.unmount();
+  localStorage.clear();
 
   const succeededPreview = renderJob({ status: "succeeded", progress: 1 });
   const runningFinal = renderJob({ id: "final1", kind: "final", status: "running", progress: 0.2 });
@@ -259,6 +260,37 @@ it("shows the backend ApiError code and message", async () => {
   expect(alert).toHaveTextContent("insufficient_usable_media");
 });
 
+it.each([
+  ["duration", async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole("radio", { name: /30 seconds/i }))],
+  ["audio start", async (user: ReturnType<typeof userEvent.setup>) => user.type(screen.getByLabelText(/audio start/i), "1")],
+  ["visual order", async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole("button", { name: /move second.jpg up/i }))],
+])("invalidates a preview when %s changes", async (_label, mutate) => {
+  // Break caught: export can use a stale plan after editable inputs diverge.
+  const api = fakeApi();
+  const user = userEvent.setup();
+  render(<DraftWorkspace api={api} project={project} selection={selection} />);
+  await user.click(screen.getByRole("button", { name: /generate draft/i }));
+  expect(await screen.findByLabelText(/reel preview/i)).toBeInTheDocument();
+  await mutate(user);
+  expect(screen.queryByLabelText(/reel preview/i)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /export final/i })).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent(/settings changed.*generate a new draft/i);
+});
+
+it("restores and validates a saved plan and render job after refresh", async () => {
+  // Break caught: React-only identifiers disappear on browser reload.
+  localStorage.setItem("holden-reel.active", JSON.stringify({
+    projectId: "p1", selection, planId: "plan1", previewJobId: "preview1",
+  }));
+  const api = fakeApi({ previewJob: renderJob({ status: "succeeded", progress: 1 }) });
+  api.getPlan = vi.fn().mockResolvedValue(plan);
+  render(<DraftWorkspace api={api} project={project} selection={selection} />);
+  expect(await screen.findByText(plan.rationale)).toBeInTheDocument();
+  expect(await screen.findByLabelText(/reel preview/i)).toHaveAttribute("src", "/api/jobs/preview1/artifact");
+  expect(api.getPlan).toHaveBeenCalledWith("plan1");
+  expect(api.getJob).toHaveBeenCalledWith("preview1");
+});
+
 function asset(overrides: Partial<MediaAsset> & Pick<MediaAsset, "id" | "path" | "kind">): MediaAsset {
   return {
     project_id: "p1",
@@ -308,11 +340,14 @@ function fakeApi(options: {
     createProject: vi.fn(),
     listProjects: vi.fn(),
     getProject: vi.fn(),
+    getPlan: vi.fn().mockResolvedValue(plan),
     importMedia: vi.fn(),
     listMedia: vi.fn(),
     composePlan: options.composePlan ?? vi.fn().mockResolvedValue(plan),
     startRender,
-    getJob: vi.fn((jobId: string) => Promise.resolve(jobs.get(jobId) ?? renderJob({ id: jobId }))),
+    getJob: vi.fn((jobId: string) => Promise.resolve(
+      jobs.get(jobId) ?? (jobId === "preview1" && options.previewJob ? options.previewJob : renderJob({ id: jobId })),
+    )),
     cancelJob: vi.fn((jobId: string) => {
       const cancelled = options.cancelledJob ?? renderJob({ id: jobId, status: "cancelled" });
       jobs.set(jobId, cancelled);

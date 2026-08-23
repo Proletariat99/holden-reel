@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from queue import Empty, Queue
 import subprocess
+import time
 from threading import Thread
 from typing import Protocol
 from uuid import UUID
@@ -211,7 +212,7 @@ class Renderer:
                 detail = f": {error}" if error else ""
                 raise RuntimeError(f"FFmpeg render failed with exit code {returncode}{detail}")
 
-            result = self.verify(partial_path, plan.duration_ms, profile)
+            result = self.verify(partial_path, plan.duration_ms, profile, is_cancelled=is_cancelled)
             partial_path.replace(output_path)
             on_progress(1.0)
             return replace(result, path=output_path)
@@ -229,10 +230,12 @@ class Renderer:
         output_path: Path,
         expected_duration_ms: int,
         profile: RenderProfile,
+        *,
+        is_cancelled: Callable[[], bool] = lambda: False,
     ) -> RenderResult:
         _require_supported_profile(profile)
         _require_path_within_data_root(output_path, self.data_root)
-        completed = subprocess.run(
+        process = subprocess.Popen(
             [
                 self.settings.ffprobe_bin,
                 "-v",
@@ -243,15 +246,27 @@ class Renderer:
                 "json",
                 str(output_path),
             ],
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             shell=False,
         )
-        if completed.returncode != 0:
-            raise RuntimeError(f"FFprobe verification failed: {completed.stderr.strip()}")
+        deadline = time.monotonic() + 30
+        while True:
+            if is_cancelled():
+                _stop_process(process)
+                raise RenderCancelled("Render was cancelled during output verification")
+            try:
+                stdout, stderr = process.communicate(timeout=0.05)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    _stop_process(process)
+                    raise RuntimeError("FFprobe verification timed out after 30 seconds")
+        if process.returncode != 0:
+            raise RuntimeError(f"FFprobe verification failed: {stderr.strip()}")
         try:
-            payload = json.loads(completed.stdout)
+            payload = json.loads(stdout)
         except json.JSONDecodeError as error:
             raise RuntimeError("FFprobe returned invalid JSON") from error
 

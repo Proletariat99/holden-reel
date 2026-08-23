@@ -46,13 +46,17 @@ class FFprobe:
         self.ffprobe_bin = ffprobe_bin
 
     def probe(self, path: Path) -> ProbeResult:
-        completed = subprocess.run(
-            [self.ffprobe_bin, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
-            check=False,
-            capture_output=True,
-            text=True,
-            shell=False,
-        )
+        try:
+            completed = subprocess.run(
+                [self.ffprobe_bin, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
+                check=False,
+                capture_output=True,
+                text=True,
+                shell=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"Media inspection timed out after 30 seconds: {path.name}") from error
         if completed.returncode != 0:
             return ProbeResult("unsupported_media", None, None, None, None)
         try:
@@ -61,14 +65,17 @@ class FFprobe:
             return ProbeResult("unsupported_media", None, None, None, None)
 
         streams = payload.get("streams", [])
-        video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+        video_streams = [
+            stream for stream in streams
+            if stream.get("codec_type") == "video" and not _is_attached_picture(stream)
+        ]
         audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
-        timed_video = next(
-            (stream for stream in video_streams if _duration_ms(stream.get("duration")) is not None),
-            None,
-        )
+        if path.suffix.casefold() in IMAGE_SUFFIXES and video_streams:
+            return _probe_result("image", video_streams[0], None)
+        format_duration = payload.get("format", {}).get("duration")
+        timed_video = next((stream for stream in video_streams if not _is_single_frame(stream)), None)
         if timed_video is not None:
-            return _probe_result("video", timed_video, timed_video.get("duration"))
+            return _probe_result("video", timed_video, timed_video.get("duration") or format_duration)
         image_stream = next(
             (stream for stream in video_streams if _is_single_frame(stream) or path.suffix.casefold() in IMAGE_SUFFIXES),
             None,
@@ -94,6 +101,10 @@ def _duration_ms(value: object) -> int | None:
 
 def _is_single_frame(stream: dict) -> bool:
     return str(stream.get("nb_frames", "")) == "1"
+
+
+def _is_attached_picture(stream: dict) -> bool:
+    return bool(stream.get("disposition", {}).get("attached_pic"))
 
 
 def _probe_result(kind: str, stream: dict, duration: object) -> ProbeResult:

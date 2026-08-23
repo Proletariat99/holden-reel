@@ -1,8 +1,49 @@
 import hashlib
 import os
 from pathlib import Path
+import subprocess
+import pytest
 
 from holden_reel.media import FFprobe
+
+
+def test_ffprobe_uses_a_bounded_timeout(monkeypatch, tmp_path):
+    """Would fail if a corrupt source could block an import forever."""
+    calls = []
+    monkeypatch.setattr("holden_reel.media.subprocess.run", lambda *a, **kw: calls.append(kw) or subprocess.CompletedProcess(a[0], 1, "", ""))
+    FFprobe("ffprobe").probe(tmp_path / "clip.mp4")
+    assert calls[0]["timeout"] == 30
+
+
+def test_ffprobe_timeout_is_actionable(monkeypatch, tmp_path):
+    """Would fail if an import timeout surfaced as an opaque subprocess exception."""
+    monkeypatch.setattr(
+        "holden_reel.media.subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired("ffprobe", 30)),
+    )
+    with pytest.raises(RuntimeError, match="timed out after 30 seconds"):
+        FFprobe("ffprobe").probe(tmp_path / "clip.mp4")
+
+
+def test_ffprobe_classifies_generated_webm_and_covered_audio(tmp_path, ffmpeg_bins):
+    """Would fail if container duration fallback or cover art were mistaken for still media."""
+    ffmpeg, ffprobe = ffmpeg_bins
+    webm = tmp_path / "clip.webm"
+    mp3 = tmp_path / "covered.mp3"
+    m4a = tmp_path / "covered.m4a"
+    cover = tmp_path / "cover.png"
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=red:s=64x64:d=1.25", "-c:v", "libvpx-vp9", str(webm)], check=True, capture_output=True, timeout=20)
+    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=blue:s=64x64", "-frames:v", "1", str(cover)], check=True, capture_output=True, timeout=20)
+    for output, codec in ((mp3, "libmp3lame"), (m4a, "aac")):
+        subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-i", str(cover), "-map", "0:a", "-map", "1:v", "-c:a", codec, "-c:v", "png", "-disposition:v", "attached_pic", str(output)], check=True, capture_output=True, timeout=20)
+    probe = FFprobe(ffprobe)
+    webm_result = probe.probe(webm)
+    assert webm_result.kind == "video"
+    assert webm_result.duration_ms is not None and abs(webm_result.duration_ms - 1250) < 100
+    for path in (mp3, m4a):
+        result = probe.probe(path)
+        assert result.kind == "audio"
+        assert result.duration_ms is not None and abs(result.duration_ms - 2000) < 100
 
 
 def test_ffprobe_extracts_stream_metadata(media_fixture):

@@ -56,6 +56,7 @@ function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
     createProject: vi.fn().mockResolvedValue(project),
     listProjects: vi.fn().mockResolvedValue([project]),
     getProject: vi.fn().mockResolvedValue(project),
+    getPlan: vi.fn(),
     importMedia: vi.fn().mockResolvedValue({ assets }),
     listMedia: vi.fn().mockResolvedValue({ assets }),
     composePlan: vi.fn(),
