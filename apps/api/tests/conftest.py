@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +8,15 @@ from holden_reel.config import Settings
 from holden_reel.main import create_app
 
 from fixture_media import FixtureMedia, generate_fixture_media
+
+
+@pytest.fixture(scope="session")
+def ffmpeg_bins() -> tuple[str, str]:
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if ffmpeg is None or ffprobe is None:
+        pytest.skip("FFmpeg and FFprobe are required for renderer tests")
+    return ffmpeg, ffprobe
 
 
 @pytest.fixture
