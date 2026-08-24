@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from .db import Database
 from .errors import DomainError
+from .focus import FOCUS_ANALYZER_VERSION, FocusAnalyzer
 from .projects import ProjectService
 
 
@@ -43,6 +44,12 @@ class MediaAsset:
     fingerprint: str
     has_audio: bool = False
     audio_duration_ms: int | None = None
+    focus_x: float | None = None
+    focus_y: float | None = None
+    focus_confidence: float | None = None
+    focus_method: str | None = None
+    focus_analyzer_version: int | None = None
+    focus_fingerprint: str | None = None
 
 
 class FFprobe:
@@ -158,26 +165,41 @@ class MediaRepository:
                     """
                     UPDATE media_assets SET kind = ?, duration_ms = ?, width = ?, height = ?, codec = ?,
                     available = ?, size_bytes = ?, modified_ns = ?, fingerprint = ?,
-                    has_audio = ?, audio_duration_ms = ? WHERE id = ?
+                    has_audio = ?, audio_duration_ms = ?, focus_x = ?, focus_y = ?,
+                    focus_confidence = ?, focus_method = ?, focus_analyzer_version = ?,
+                    focus_fingerprint = ? WHERE id = ?
                     """,
                     (asset.kind, asset.duration_ms, asset.width, asset.height, asset.codec,
                      int(asset.available), size_bytes, modified_ns, asset.fingerprint,
-                     int(asset.has_audio), asset.audio_duration_ms, str(asset.id)),
+                     int(asset.has_audio), asset.audio_duration_ms, asset.focus_x, asset.focus_y,
+                     asset.focus_confidence, asset.focus_method, asset.focus_analyzer_version,
+                     asset.focus_fingerprint, str(asset.id)),
                 )
             else:
                 connection.execute(
                     """
                     INSERT INTO media_assets (
                       id, project_id, path, kind, duration_ms, width, height, codec,
-                      available, size_bytes, modified_ns, fingerprint, has_audio, audio_duration_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      available, size_bytes, modified_ns, fingerprint, has_audio, audio_duration_ms,
+                      focus_x, focus_y, focus_confidence, focus_method, focus_analyzer_version,
+                      focus_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (str(asset.id), str(asset.project_id), str(asset.path), asset.kind,
                      asset.duration_ms, asset.width, asset.height, asset.codec, int(asset.available),
                      size_bytes, modified_ns, asset.fingerprint, int(asset.has_audio),
-                     asset.audio_duration_ms),
+                     asset.audio_duration_ms, asset.focus_x, asset.focus_y,
+                     asset.focus_confidence, asset.focus_method, asset.focus_analyzer_version,
+                     asset.focus_fingerprint),
                 )
         return asset
+
+    def find_by_path(self, project_id: UUID, path: Path) -> MediaAsset | None:
+        row = self.database.fetch_one(
+            "SELECT * FROM media_assets WHERE project_id = ? AND path = ?",
+            (str(project_id), str(path.resolve())),
+        )
+        return self._to_asset(row) if row is not None else None
 
     def list_for_project(self, project_id: UUID) -> list[MediaAsset]:
         rows = self.database.fetch_all(
@@ -200,6 +222,10 @@ class MediaRepository:
             height=row["height"], codec=row["codec"], available=bool(row["available"]),
             fingerprint=row["fingerprint"], has_audio=bool(row["has_audio"]),
             audio_duration_ms=row["audio_duration_ms"],
+            focus_x=row["focus_x"], focus_y=row["focus_y"],
+            focus_confidence=row["focus_confidence"], focus_method=row["focus_method"],
+            focus_analyzer_version=row["focus_analyzer_version"],
+            focus_fingerprint=row["focus_fingerprint"],
         )
 
 
@@ -209,14 +235,25 @@ def _asset_fields(asset: MediaAsset) -> dict:
         "duration_ms": asset.duration_ms, "width": asset.width, "height": asset.height,
         "codec": asset.codec, "available": asset.available, "fingerprint": asset.fingerprint,
         "has_audio": asset.has_audio, "audio_duration_ms": asset.audio_duration_ms,
+        "focus_x": asset.focus_x, "focus_y": asset.focus_y,
+        "focus_confidence": asset.focus_confidence, "focus_method": asset.focus_method,
+        "focus_analyzer_version": asset.focus_analyzer_version,
+        "focus_fingerprint": asset.focus_fingerprint,
     }
 
 
 class MediaService:
-    def __init__(self, repository: MediaRepository, projects: ProjectService, ffprobe: FFprobe):
+    def __init__(
+        self,
+        repository: MediaRepository,
+        projects: ProjectService,
+        ffprobe: FFprobe,
+        focus_analyzer: FocusAnalyzer,
+    ):
         self.repository = repository
         self.projects = projects
         self.ffprobe = ffprobe
+        self.focus_analyzer = focus_analyzer
 
     def import_path(self, project_id: UUID, path: Path) -> list[MediaAsset]:
         self.projects.get(project_id)
@@ -233,11 +270,52 @@ class MediaService:
                     continue
                 raise DomainError("unsupported_media", "Media file is unsupported", status_code=422)
             stat = candidate.stat()
+            fingerprint = _fingerprint(candidate, stat.st_size, stat.st_mtime_ns)
+            existing = self.repository.find_by_path(project_id, candidate)
+            cache_is_current = (
+                existing is not None
+                and existing.focus_fingerprint == fingerprint
+                and existing.focus_analyzer_version == FOCUS_ANALYZER_VERSION
+                and existing.focus_x is not None
+                and existing.focus_y is not None
+                and existing.focus_method is not None
+            )
+            focus_fields: dict[str, object | None]
+            if probe.kind in {"image", "video"}:
+                if cache_is_current:
+                    focus_fields = {
+                        "focus_x": existing.focus_x,
+                        "focus_y": existing.focus_y,
+                        "focus_confidence": existing.focus_confidence,
+                        "focus_method": existing.focus_method,
+                        "focus_analyzer_version": existing.focus_analyzer_version,
+                        "focus_fingerprint": existing.focus_fingerprint,
+                    }
+                else:
+                    focus = self.focus_analyzer.analyze(candidate, probe.kind)
+                    focus_fields = {
+                        "focus_x": focus.x,
+                        "focus_y": focus.y,
+                        "focus_confidence": focus.confidence,
+                        "focus_method": focus.method,
+                        "focus_analyzer_version": focus.analyzer_version,
+                        "focus_fingerprint": fingerprint,
+                    }
+            else:
+                focus_fields = {
+                    "focus_x": None,
+                    "focus_y": None,
+                    "focus_confidence": None,
+                    "focus_method": None,
+                    "focus_analyzer_version": None,
+                    "focus_fingerprint": None,
+                }
             asset = MediaAsset(
                 id=uuid4(), project_id=project_id, path=candidate, kind=probe.kind,
                 duration_ms=probe.duration_ms, width=probe.width, height=probe.height, codec=probe.codec,
-                available=True, fingerprint=_fingerprint(candidate, stat.st_size, stat.st_mtime_ns),
+                available=True, fingerprint=fingerprint,
                 has_audio=probe.has_audio, audio_duration_ms=probe.audio_duration_ms,
+                **focus_fields,
             )
             assets.append(self.repository.save(asset, stat.st_size, stat.st_mtime_ns))
         return assets

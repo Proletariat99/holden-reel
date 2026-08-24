@@ -1,10 +1,229 @@
 import hashlib
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
+from uuid import uuid4
+
 import pytest
 
+from holden_reel.db import open_database
+from holden_reel.focus import FOCUS_ANALYZER_VERSION, center_focus
 from holden_reel.media import FFprobe
+
+
+def test_migration_6_adds_nullable_focus_columns_without_altering_old_rows(tmp_path):
+    """Would fail if migration 6 omitted metadata or rewrote a version-5 asset."""
+    database_path = tmp_path / "version-5.sqlite3"
+    project_id = uuid4()
+    asset_id = uuid4()
+    connection = sqlite3.connect(database_path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_migrations (version) VALUES (1), (2), (3), (4), (5);
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE media_assets (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          path TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          duration_ms INTEGER,
+          width INTEGER,
+          height INTEGER,
+          codec TEXT,
+          available INTEGER NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          modified_ns INTEGER NOT NULL,
+          fingerprint TEXT NOT NULL,
+          has_audio INTEGER NOT NULL DEFAULT 0,
+          audio_duration_ms INTEGER,
+          UNIQUE(project_id, path)
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO projects VALUES (?, 'Existing', 'created', 'updated')",
+        (str(project_id),),
+    )
+    connection.execute(
+        """
+        INSERT INTO media_assets VALUES (
+          ?, ?, '/existing/clip.mp4', 'video', 4000, 320, 240, 'h264',
+          1, 1234, 5678, 'old-fingerprint', 1, 4000
+        )
+        """,
+        (str(asset_id), str(project_id)),
+    )
+    connection.commit()
+    connection.close()
+
+    migrated = open_database(database_path)
+    columns = {
+        row[1] for row in migrated.execute("PRAGMA table_info(media_assets)").fetchall()
+    }
+    row = migrated.execute(
+        "SELECT * FROM media_assets WHERE id = ?", (str(asset_id),)
+    ).fetchone()
+    versions = migrated.execute(
+        "SELECT version FROM schema_migrations WHERE version = 6"
+    ).fetchall()
+
+    assert {
+        "focus_x",
+        "focus_y",
+        "focus_confidence",
+        "focus_method",
+        "focus_analyzer_version",
+        "focus_fingerprint",
+    } <= columns
+    assert tuple(row[:14]) == (
+        str(asset_id),
+        str(project_id),
+        "/existing/clip.mp4",
+        "video",
+        4000,
+        320,
+        240,
+        "h264",
+        1,
+        1234,
+        5678,
+        "old-fingerprint",
+        1,
+        4000,
+    )
+    assert tuple(row[14:]) == (None, None, None, None, None, None)
+    assert [version["version"] for version in versions] == [6]
+    migrated.close()
+
+
+def test_repository_finds_imported_asset_by_resolved_path(media_service_harness, tmp_path):
+    """Would fail if focus caching could not load the existing path-keyed asset."""
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    imported = media_service_harness.service.import_path(
+        media_service_harness.project_id, source.resolve()
+    )[0]
+
+    found = media_service_harness.repository.find_by_path(
+        media_service_harness.project_id, source
+    )
+
+    assert found == imported
+
+
+def test_import_reuses_focus_until_the_source_fingerprint_changes(
+    media_service_harness, tmp_path
+):
+    """Would fail if cache keys were ignored or fresh source metadata reused stale focus."""
+    source = (tmp_path / "clip.mp4").resolve()
+    source.write_bytes(b"video")
+
+    first = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+    second = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+
+    assert media_service_harness.analyzer.calls == [(source.resolve(), "video")]
+    assert second.focus_fingerprint == first.fingerprint
+    assert second.id == first.id
+
+    stat = source.stat()
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    third = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+
+    assert len(media_service_harness.analyzer.calls) == 2
+    assert third.focus_fingerprint == third.fingerprint
+    assert third.fingerprint != first.fingerprint
+    assert third.id == first.id
+
+
+def test_missing_and_stale_focus_versions_trigger_analysis(media_service_harness, tmp_path):
+    """Would fail if analyzer-version changes could reuse incompatible cached focus."""
+    source = (tmp_path / "clip.mp4").resolve()
+    source.write_bytes(b"video")
+    media_service_harness.service.import_path(media_service_harness.project_id, source)
+
+    with media_service_harness.database.transaction() as connection:
+        connection.execute(
+            "UPDATE media_assets SET focus_analyzer_version = NULL WHERE path = ?",
+            (str(source),),
+        )
+    missing = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+
+    with media_service_harness.database.transaction() as connection:
+        connection.execute(
+            "UPDATE media_assets SET focus_analyzer_version = ? WHERE path = ?",
+            (FOCUS_ANALYZER_VERSION - 1, str(source)),
+        )
+    stale = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+
+    assert len(media_service_harness.analyzer.calls) == 3
+    assert missing.focus_analyzer_version == FOCUS_ANALYZER_VERSION
+    assert stale.focus_analyzer_version == FOCUS_ANALYZER_VERSION
+
+
+def test_center_fallback_is_persisted_as_a_valid_cached_result(
+    media_service_harness, tmp_path
+):
+    """Would fail if a safe center result were treated as missing and repeatedly analyzed."""
+    source = (tmp_path / "still.jpg").resolve()
+    source.write_bytes(b"image")
+    media_service_harness.analyzer.result = center_focus()
+
+    first = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+    second = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+
+    assert len(media_service_harness.analyzer.calls) == 1
+    assert (
+        first.focus_x,
+        first.focus_y,
+        first.focus_confidence,
+        first.focus_method,
+        first.focus_analyzer_version,
+        first.focus_fingerprint,
+    ) == (0.5, 0.5, 0.0, "center", FOCUS_ANALYZER_VERSION, first.fingerprint)
+    assert second == first
+
+
+def test_audio_assets_leave_focus_metadata_null_without_analysis(
+    media_service_harness, tmp_path
+):
+    """Would fail if nonvisual audio invoked focus analysis or persisted visual metadata."""
+    source = (tmp_path / "song.wav").resolve()
+    source.write_bytes(b"audio")
+
+    asset = media_service_harness.service.import_path(
+        media_service_harness.project_id, source
+    )[0]
+
+    assert media_service_harness.analyzer.calls == []
+    assert (
+        asset.focus_x,
+        asset.focus_y,
+        asset.focus_confidence,
+        asset.focus_method,
+        asset.focus_analyzer_version,
+        asset.focus_fingerprint,
+    ) == (None, None, None, None, None, None)
 
 
 def test_ffprobe_uses_a_bounded_timeout(monkeypatch, tmp_path):
@@ -105,6 +324,40 @@ def test_import_folder_catalogs_supported_media_without_copying(client, media_fi
         name: (path.stat().st_size, path.stat().st_mtime_ns)
         for name, path in media_fixture.paths.items()
     } == original_stats
+
+
+def test_import_and_list_json_include_normalized_focus_metadata(
+    client, media_fixture, focus_analyzer
+):
+    """Would fail if API serialization dropped persisted normalized focus metadata."""
+    project = client.post("/api/projects", json={"name": "Fixture"}).json()
+    source = media_fixture.paths["red.mp4"]
+
+    imported = client.post(
+        f"/api/projects/{project['id']}/media/import",
+        json={"path": str(source)},
+    )
+    listed = client.get(f"/api/projects/{project['id']}/media")
+
+    assert imported.status_code == 201
+    assert listed.status_code == 200
+    expected_focus = {
+        "focus_x": 0.25,
+        "focus_y": 0.75,
+        "focus_confidence": 0.8,
+        "focus_method": "face",
+        "focus_analyzer_version": FOCUS_ANALYZER_VERSION,
+    }
+    imported_asset = imported.json()["assets"][0]
+    listed_asset = listed.json()["assets"][0]
+    assert {key: imported_asset[key] for key in expected_focus} == expected_focus
+    assert {key: listed_asset[key] for key in expected_focus} == expected_focus
+    assert imported_asset["focus_fingerprint"] == imported_asset["fingerprint"]
+    assert listed_asset["focus_fingerprint"] == listed_asset["fingerprint"]
+    assert all(0.0 <= imported_asset[key] <= 1.0 for key in (
+        "focus_x", "focus_y", "focus_confidence"
+    ))
+    assert focus_analyzer.calls == [(source.resolve(), "video")]
 
 
 def test_reimport_refreshes_path_size_mtime_fingerprint(client, media_fixture):

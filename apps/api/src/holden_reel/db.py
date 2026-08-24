@@ -143,5 +143,19 @@ def open_database(path: Path) -> sqlite3.Connection:
         )
         connection.execute("INSERT INTO schema_migrations (version) VALUES (5)")
 
+    migration = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = 6"
+    ).fetchone()
+    if migration is None:
+        connection.execute("ALTER TABLE media_assets ADD COLUMN focus_x REAL")
+        connection.execute("ALTER TABLE media_assets ADD COLUMN focus_y REAL")
+        connection.execute("ALTER TABLE media_assets ADD COLUMN focus_confidence REAL")
+        connection.execute("ALTER TABLE media_assets ADD COLUMN focus_method TEXT")
+        connection.execute(
+            "ALTER TABLE media_assets ADD COLUMN focus_analyzer_version INTEGER"
+        )
+        connection.execute("ALTER TABLE media_assets ADD COLUMN focus_fingerprint TEXT")
+        connection.execute("INSERT INTO schema_migrations (version) VALUES (6)")
+
     connection.commit()
     return connection

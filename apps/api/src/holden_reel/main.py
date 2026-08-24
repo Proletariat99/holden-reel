@@ -6,6 +6,7 @@ from .api import api_router, register_error_handlers
 from .artifacts import ArtifactStore
 from .config import Settings
 from .db import Database, open_database
+from .focus import FocusAnalyzer
 from .jobs import JobService, RenderWorker
 from .media import FFprobe, MediaRepository, MediaService
 from .plans import PlanRepository, PlanService
@@ -34,6 +35,7 @@ def create_app(
         MediaRepository(app.state.database),
         app.state.project_service,
         FFprobe(app.state.settings.ffprobe_bin),
+        FocusAnalyzer(),
     )
     app.state.plan_service = PlanService(
         PlanRepository(app.state.database),
