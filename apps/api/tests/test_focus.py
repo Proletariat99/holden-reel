@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from holden_reel.focus import FocusAnalyzer, center_focus
-from holden_reel.focus_worker import Candidate, choose_focus
+from holden_reel.focus_worker import Candidate, OpenCVSubjectDetector, choose_focus
 
 
 def solid_frame() -> np.ndarray:
@@ -52,6 +52,16 @@ class RaisingDetector(StubDetector):
         raise RuntimeError("detector unavailable")
 
 
+class WeightedFaceCascade:
+    def detectMultiScale3(self, frame: np.ndarray, **kwargs):
+        assert kwargs["outputRejectLevels"] is True
+        return (
+            np.array([[10, 20, 20, 10]], dtype=np.int32),
+            np.array([20], dtype=np.int32),
+            np.array([0.0], dtype=float),
+        )
+
+
 def test_faces_outrank_people_and_image_fallback():
     """Would fail if face candidates did not take priority over people."""
     detector = StubDetector(
@@ -85,6 +95,18 @@ def test_low_signal_and_detector_failure_return_center():
     assert choose_focus([solid_frame()], RaisingDetector()) == center_focus()
 
 
+def test_face_weight_multiplies_area_by_normalized_haar_confidence():
+    """Would fail if Haar detections were treated as fully confident regardless of their score."""
+    detector = OpenCVSubjectDetector()
+    detector.face_cascade = WeightedFaceCascade()
+
+    candidate = detector.detect_faces(np.zeros((100, 100, 3), dtype=np.uint8))[0]
+
+    assert candidate.x == pytest.approx(0.2)
+    assert candidate.y == pytest.approx(0.25)
+    assert candidate.weight == pytest.approx(0.01)
+
+
 def test_analyzer_invokes_bounded_worker_and_parses_result(monkeypatch, tmp_path):
     """Would fail if imports could use a shell, omit a timeout, or reject valid worker JSON."""
     path = tmp_path / "still.jpg"
@@ -116,6 +138,8 @@ def test_analyzer_invokes_bounded_worker_and_parses_result(monkeypatch, tmp_path
         subprocess.CompletedProcess([], 0, "not json", ""),
         subprocess.CompletedProcess([], 0, '{"x": 1.1, "y": 0.5, "confidence": 0.4, "method": "face", "analyzer_version": 1}', ""),
         subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": "unknown", "analyzer_version": 1}', ""),
+        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": [], "analyzer_version": 1}', ""),
+        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": {}, "analyzer_version": 1}', ""),
     ],
 )
 def test_analyzer_invalid_worker_result_returns_center(monkeypatch, tmp_path, completed):

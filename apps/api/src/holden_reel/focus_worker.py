@@ -37,15 +37,20 @@ class OpenCVSubjectDetector:
 
     def detect_faces(self, frame: np.ndarray) -> list[Candidate]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        boxes = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-        return _boxes_to_candidates(boxes, frame.shape, "face", np.ones(len(boxes)))
+        boxes, _, weights = self.face_cascade.detectMultiScale3(
+            gray, scaleFactor=1.1, minNeighbors=5, outputRejectLevels=True
+        )
+        return _boxes_to_candidates(boxes, frame.shape, "face", _normalized_detector_confidences(weights))
 
     def detect_people(self, frame: np.ndarray) -> list[Candidate]:
         boxes, weights = self.people_detector.detectMultiScale(frame, winStride=(8, 8), padding=(8, 8), scale=1.05)
-        confidences = np.asarray(weights, dtype=float).reshape(-1)
-        # HOG scores are unbounded margins; the sigmoid maps them into detector confidence.
-        confidences = 1.0 / (1.0 + np.exp(-np.clip(confidences, -20.0, 20.0)))
-        return _boxes_to_candidates(boxes, frame.shape, "person", confidences)
+        return _boxes_to_candidates(boxes, frame.shape, "person", _normalized_detector_confidences(weights))
+
+
+def _normalized_detector_confidences(weights: Sequence[float] | np.ndarray) -> np.ndarray:
+    """Map unbounded OpenCV detector margins to confidence values in 0.0..1.0."""
+    margins = np.asarray(weights, dtype=float).reshape(-1)
+    return 1.0 / (1.0 + np.exp(-np.clip(margins, -20.0, 20.0)))
 
 
 def _boxes_to_candidates(

@@ -75,6 +75,7 @@ def _parse_result(output: str) -> FocusResult:
     if (
         not all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) for value in values)
         or not all(0.0 <= value <= 1.0 for value in values)
+        or not isinstance(method, str)
         or method not in {"face", "person", "motion", "contrast", "center"}
         or not isinstance(version, int)
         or isinstance(version, bool)
