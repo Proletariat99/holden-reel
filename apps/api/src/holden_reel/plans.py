@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from math import ceil
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .db import Database
 from .errors import DomainError
+from .focus import FocusMethod
 from .media import MediaAsset, MediaService
 from .projects import ProjectService
+
+
+TransitionStyle = Literal["cut", "dissolve"]
+DISSOLVE_DURATION_MS = 200
+MIN_SHOT_DURATION_MS = 600
+
+
+def transition_overlap_ms(style: TransitionStyle) -> int:
+    return DISSOLVE_DURATION_MS if style == "dissolve" else 0
 
 
 class Shot(BaseModel):
@@ -20,6 +31,9 @@ class Shot(BaseModel):
     output_end_ms: int
     fit: Literal["cover"] = "cover"
     still_motion: Literal["slow_zoom"] | None = None
+    focus_x: float = Field(default=0.5, ge=0.0, le=1.0)
+    focus_y: float = Field(default=0.5, ge=0.0, le=1.0)
+    focus_method: FocusMethod = "center"
 
 
 class AudioBed(BaseModel):
@@ -42,6 +56,7 @@ class ReelPlan(BaseModel):
     audio: AudioBed
     shots: list[Shot]
     rationale: str
+    transition_style: TransitionStyle = "cut"
 
 
 class ComposePlanRequest(BaseModel):
@@ -49,6 +64,7 @@ class ComposePlanRequest(BaseModel):
     audio_asset_id: UUID
     audio_start_ms: int
     visual_asset_ids: list[UUID]
+    transition_style: TransitionStyle = "cut"
 
 
 class PlanValidator:
@@ -97,17 +113,21 @@ class PlanValidator:
         if plan.audio.source_end_ms - plan.audio.source_start_ms < plan.duration_ms:
             violations.append("audio must cover output duration")
 
+        overlap_ms = transition_overlap_ms(plan.transition_style)
         expected_start = 0
-        gap_found = False
-        for shot in plan.shots:
+        boundaries_match = True
+        for index, shot in enumerate(plan.shots):
             if shot.output_end_ms <= shot.output_start_ms:
                 violations.append("shots must have positive output duration")
                 break
             if shot.output_start_ms != expected_start:
-                gap_found = True
-            expected_start = shot.output_end_ms
-        if gap_found or (duration_is_supported and expected_start != plan.duration_ms):
-            violations.append("shots must cover output without gaps")
+                boundaries_match = False
+                violations.append("shot boundaries must match transition overlap")
+            if shot.output_end_ms - shot.output_start_ms <= overlap_ms:
+                violations.append("shots must be longer than the transition overlap")
+            expected_start = shot.output_end_ms - overlap_ms
+        if plan.shots and plan.shots[-1].output_end_ms != plan.duration_ms:
+            violations.append("shots must end at output duration")
 
         for shot in plan.shots:
             asset = by_id.get(shot.asset_id)
@@ -122,7 +142,7 @@ class PlanValidator:
                     violations.append("video source ranges must fit asset duration")
                 elif (
                     times_are_nonnegative
-                    and not gap_found
+                    and boundaries_match
                     and (
                         shot.source_end_ms - shot.source_start_ms
                         != shot.output_end_ms - shot.output_start_ms
@@ -212,8 +232,19 @@ class PlanService:
         if not visuals:
             raise _insufficient_media()
 
-        interval_ms = max(1, min(3_000, request.duration_ms // len(visuals)))
-        shots = self._compose_shots(visuals, request.duration_ms, interval_ms)
+        overlap_ms = transition_overlap_ms(request.transition_style)
+        shot_count = max(len(visuals), ceil(request.duration_ms / 3_000))
+        if (
+            shot_count * MIN_SHOT_DURATION_MS
+            > request.duration_ms + (shot_count - 1) * overlap_ms
+        ):
+            raise _insufficient_media()
+        shots = self._compose_shots(
+            visuals,
+            request.duration_ms,
+            shot_count,
+            overlap_ms,
+        )
         plan = ReelPlan.model_construct(
             id=uuid4(),
             project_id=project_id,
@@ -226,6 +257,7 @@ class PlanService:
             ),
             shots=shots,
             rationale="Deterministic visual rotation using supplied source order.",
+            transition_style=request.transition_style,
         )
         self.validator.validate(plan, by_id)
         return self.repository.insert(plan)
@@ -238,14 +270,22 @@ class PlanService:
 
     @staticmethod
     def _compose_shots(
-        visuals: list[MediaAsset], duration_ms: int, interval_ms: int
+        visuals: list[MediaAsset],
+        duration_ms: int,
+        shot_count: int,
+        overlap_ms: int,
     ) -> list[Shot]:
         shots: list[Shot] = []
         cursor = 0
+        segment_total_ms = duration_ms + (shot_count - 1) * overlap_ms
+        base_ms, remainder = divmod(segment_total_ms, shot_count)
+        durations = [
+            base_ms + (1 if index < remainder else 0)
+            for index in range(shot_count)
+        ]
         output_start_ms = 0
-        while output_start_ms < duration_ms:
-            output_end_ms = min(output_start_ms + interval_ms, duration_ms)
-            shot_duration_ms = output_end_ms - output_start_ms
+        for shot_duration_ms in durations:
+            output_end_ms = output_start_ms + shot_duration_ms
             for _ in range(len(visuals)):
                 asset = visuals[cursor]
                 cursor = (cursor + 1) % len(visuals)
@@ -258,6 +298,13 @@ class PlanService:
                             output_start_ms=output_start_ms,
                             output_end_ms=output_end_ms,
                             still_motion="slow_zoom",
+                            focus_x=asset.focus_x if asset.focus_x is not None else 0.5,
+                            focus_y=asset.focus_y if asset.focus_y is not None else 0.5,
+                            focus_method=(
+                                asset.focus_method
+                                if asset.focus_method is not None
+                                else "center"
+                            ),
                         )
                     )
                     break
@@ -269,12 +316,19 @@ class PlanService:
                             source_end_ms=shot_duration_ms,
                             output_start_ms=output_start_ms,
                             output_end_ms=output_end_ms,
+                            focus_x=asset.focus_x if asset.focus_x is not None else 0.5,
+                            focus_y=asset.focus_y if asset.focus_y is not None else 0.5,
+                            focus_method=(
+                                asset.focus_method
+                                if asset.focus_method is not None
+                                else "center"
+                            ),
                         )
                     )
                     break
             else:
                 raise _insufficient_media()
-            output_start_ms = output_end_ms
+            output_start_ms = output_end_ms - overlap_ms
         return shots
 
 
