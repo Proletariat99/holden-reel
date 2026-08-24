@@ -14,7 +14,7 @@ from uuid import UUID
 
 from .config import Settings
 from .media import MediaAsset
-from .plans import ReelPlan, Shot
+from .plans import DISSOLVE_DURATION_MS, ReelPlan, Shot
 
 
 @dataclass(frozen=True)
@@ -96,9 +96,7 @@ class FFmpegCompiler:
                 plan.duration_ms,
             )
         )
-        filters.append(
-            f"{''.join(visual_labels)}concat=n={len(visual_labels)}:v=1:a=0[vout]"
-        )
+        filters.extend(_visual_join_filter(plan, visual_labels))
 
         command.extend(
             [
@@ -335,7 +333,7 @@ def _video_filter(index: int, shot: Shot, profile: RenderProfile) -> str:
         f"end={_seconds(shot.source_end_ms)},setpts=PTS-STARTPTS,"
         f"fps={profile.fps},"
         f"scale={profile.width}:{profile.height}:force_original_aspect_ratio=increase,"
-        f"crop={profile.width}:{profile.height},setsar=1,format=yuv420p[v{index}]"
+        f"{_focus_crop(profile, shot)},setsar=1,format=yuv420p[v{index}]"
     )
 
 
@@ -344,13 +342,40 @@ def _image_filter(index: int, shot: Shot, profile: RenderProfile) -> str:
     return (
         f"[{index}:v]fps={profile.fps},"
         f"scale={profile.width}:{profile.height}:force_original_aspect_ratio=increase,"
-        f"crop={profile.width}:{profile.height},setsar=1,"
+        f"{_focus_crop(profile, shot)},setsar=1,"
         "zoompan=z='min(zoom+0.0005,1.08)':"
         "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
         f"d=1:s={profile.width}x{profile.height}:fps={profile.fps},"
         f"trim=duration={_seconds(duration_ms)},setpts=PTS-STARTPTS,"
         f"format=yuv420p[v{index}]"
     )
+
+
+def _focus_crop(profile: RenderProfile, shot: Shot) -> str:
+    return (
+        f"crop={profile.width}:{profile.height}:"
+        f"x='min(max(iw*{shot.focus_x:.6f}-{profile.width}/2,0),iw-{profile.width})':"
+        f"y='min(max(ih*{shot.focus_y:.6f}-{profile.height}/2,0),ih-{profile.height})'"
+    )
+
+
+def _visual_join_filter(plan: ReelPlan, labels: Sequence[str]) -> list[str]:
+    if plan.transition_style == "cut":
+        return [f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[vout]"]
+    if len(labels) == 1:
+        return [f"{labels[0]}null[vout]"]
+
+    filters: list[str] = []
+    current_label = labels[0]
+    for index, next_label in enumerate(labels[1:], start=1):
+        output_label = "[vout]" if index == len(labels) - 1 else f"[x{index}]"
+        filters.append(
+            f"{current_label}{next_label}xfade=transition=fade:"
+            f"duration={_seconds(DISSOLVE_DURATION_MS)}:"
+            f"offset={_seconds(plan.shots[index].output_start_ms)}{output_label}"
+        )
+        current_label = output_label
+    return filters
 
 
 def _audio_filter(

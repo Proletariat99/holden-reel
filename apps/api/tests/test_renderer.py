@@ -198,6 +198,118 @@ def test_compiler_loops_images_and_uses_exact_final_profile(valid_plan, command_
     assert "-shortest" in command
 
 
+@pytest.mark.parametrize(
+    ("profile", "expected_x", "expected_y"),
+    [
+        (
+            PREVIEW,
+            "x='min(max(iw*0.150000-540/2,0),iw-540)'",
+            "y='min(max(ih*0.700000-960/2,0),ih-960)'",
+        ),
+        (
+            FINAL,
+            "x='min(max(iw*0.150000-1080/2,0),iw-1080)'",
+            "y='min(max(ih*0.700000-1920/2,0),ih-1920)'",
+        ),
+    ],
+    ids=["preview", "final"],
+)
+def test_compiler_crops_video_and_still_around_the_clamped_focus_point(
+    valid_plan, command_assets, profile, expected_x, expected_y
+):
+    """Would fail if either visual pipeline ignored focus or padded the source."""
+    plan = valid_plan.model_copy(deep=True)
+    plan.shots[0].focus_x = 0.15
+    plan.shots[0].focus_y = 0.7
+    plan.shots[2].focus_x = 0.15
+    plan.shots[2].focus_y = 0.7
+
+    command = FFmpegCompiler("ffmpeg").compile(
+        plan, command_assets, profile, Path("/render/focused.mp4")
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+    video_filter = next(
+        fragment for fragment in filter_complex.split(";") if fragment.startswith("[0:v]")
+    )
+    image_filter = next(
+        fragment for fragment in filter_complex.split(";") if fragment.startswith("[2:v]")
+    )
+    scale = (
+        f"scale={profile.width}:{profile.height}:"
+        "force_original_aspect_ratio=increase"
+    )
+
+    for visual_filter in (video_filter, image_filter):
+        assert scale in visual_filter
+        assert expected_x in visual_filter
+        assert expected_y in visual_filter
+        assert visual_filter.index(scale) < visual_filter.index("crop=")
+        assert "pad=" not in visual_filter
+    assert image_filter.index("crop=") < image_filter.index("zoompan=")
+    assert "zoompan=z='min(zoom+0.0005,1.08)':x='iw/2-(iw/zoom/2)'" in image_filter
+
+
+def test_compiler_joins_cut_shots_with_one_video_concat(valid_plan, command_assets):
+    """Would fail if cut plans accidentally gained overlapping video transitions."""
+    command = FFmpegCompiler("ffmpeg").compile(
+        valid_plan, command_assets, PREVIEW, Path("/render/cut.mp4")
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+
+    assert filter_complex.count("concat=") == 1
+    assert "[v0][v1][v2][v3][v4]concat=n=5:v=1:a=0[vout]" in filter_complex
+    assert "xfade=" not in filter_complex
+
+
+def test_compiler_chains_dissolves_at_global_next_shot_offsets(
+    valid_plan, command_assets
+):
+    """Would fail if dissolve offsets were local or intermediate labels were miswired."""
+    plan = valid_plan.model_copy(deep=True)
+    plan.transition_style = "dissolve"
+    plan.shots = [
+        _video_shot(RED_ID, 0, 3_160),
+        _video_shot(BLUE_ID, 2_960, 6_120),
+        Shot(
+            asset_id=STILL_ID,
+            source_start_ms=None,
+            source_end_ms=None,
+            output_start_ms=5_920,
+            output_end_ms=15_000,
+            still_motion="slow_zoom",
+        ),
+    ]
+
+    command = FFmpegCompiler("ffmpeg").compile(
+        plan, command_assets, PREVIEW, Path("/render/dissolve.mp4")
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+
+    assert "[v0][v1]xfade=transition=fade:duration=0.2:offset=2.96[x1]" in filter_complex
+    assert "[x1][v2]xfade=transition=fade:duration=0.2:offset=5.92[vout]" in filter_complex
+    assert filter_complex.count("xfade=") == 2
+    assert "concat=" not in filter_complex
+    assert filter_complex.count("[3:a]atrim=start=1:end=16") == 1
+    assert "afade=" not in filter_complex
+    assert "acrossfade=" not in filter_complex
+
+
+def test_compiler_aliases_a_one_shot_dissolve_without_xfade(valid_plan, command_assets):
+    """Would fail if a one-shot dissolve invoked a transition without two inputs."""
+    plan = valid_plan.model_copy(deep=True)
+    plan.transition_style = "dissolve"
+    plan.shots = [_video_shot(RED_ID, 0, 15_000)]
+
+    command = FFmpegCompiler("ffmpeg").compile(
+        plan, command_assets, PREVIEW, Path("/render/one-shot.mp4")
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+
+    assert "[v0]null[vout]" in filter_complex
+    assert "xfade=" not in filter_complex
+    assert "concat=" not in filter_complex
+
+
 def test_compiler_rejects_output_equal_to_any_source(valid_plan, command_assets):
     """Would fail if FFmpeg could overwrite an original source asset."""
     with pytest.raises(ValueError, match="source"):
