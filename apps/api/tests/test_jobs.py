@@ -17,6 +17,7 @@ from holden_reel.api import api_router, register_error_handlers
 from holden_reel.artifacts import ArtifactStore
 from holden_reel.config import Settings
 from holden_reel.db import Database, open_database
+from holden_reel.focus import FocusResult, center_focus
 from holden_reel.jobs import JobService
 from holden_reel.main import create_app
 from holden_reel.media import FFprobe, MediaRepository, MediaService
@@ -41,6 +42,11 @@ class ServiceHarness:
     connection: sqlite3.Connection
     plan: ReelPlan
     data_dir: Path
+
+
+class DeterministicFocusAnalyzer:
+    def analyze(self, path: Path, kind: str) -> FocusResult:
+        return center_focus()
 
 
 class BlockingRenderer:
@@ -150,7 +156,10 @@ def _make_harness(
     projects = ProjectService(ProjectRepository(database))
     project = projects.create("Job fixture")
     media = MediaService(
-        MediaRepository(database), projects, FFprobe("unused-ffprobe")
+        MediaRepository(database),
+        projects,
+        FFprobe("unused-ffprobe"),
+        DeterministicFocusAnalyzer(),
     )
     plans = PlanService(PlanRepository(database), projects, media)
     plan = PlanRepository(database).insert(
@@ -704,6 +713,7 @@ def test_startup_recovery_fails_stale_running_job(tmp_path):
                     MediaRepository(initial.database),
                     ProjectService(ProjectRepository(initial.database)),
                     FFprobe("unused-ffprobe"),
+                    DeterministicFocusAnalyzer(),
                 ),
             ),
             ImmediateRenderer(),
@@ -742,7 +752,12 @@ def test_startup_recovery_fails_stale_queued_job(tmp_path):
             PlanService(
                 PlanRepository(initial.database),
                 projects,
-                MediaService(MediaRepository(initial.database), projects, FFprobe("unused")),
+                MediaService(
+                    MediaRepository(initial.database),
+                    projects,
+                    FFprobe("unused"),
+                    DeterministicFocusAnalyzer(),
+                ),
             ),
             ImmediateRenderer(),
             ArtifactStore(initial.data_dir),
@@ -826,6 +841,7 @@ def test_startup_recovery_removes_only_expected_stale_render_outputs(tmp_path):
                     MediaRepository(initial.database),
                     ProjectService(ProjectRepository(initial.database)),
                     FFprobe("unused-ffprobe"),
+                    DeterministicFocusAnalyzer(),
                 ),
             ),
             ImmediateRenderer(),
