@@ -62,6 +62,8 @@ def _asset(
     width: int | None = None,
     height: int | None = None,
     available: bool = True,
+    has_audio: bool | None = None,
+    audio_duration_ms: int | None = None,
 ) -> MediaAsset:
     return MediaAsset(
         id=asset_id,
@@ -74,7 +76,26 @@ def _asset(
         codec="fixture",
         available=available,
         fingerprint="fixture",
+        has_audio=kind == "audio" if has_audio is None else has_audio,
+        audio_duration_ms=duration_ms if kind == "audio" else audio_duration_ms,
     )
+
+
+def test_plan_accepts_embedded_video_audio_as_its_soundtrack(valid_plan, assets):
+    """Would fail if a video with a usable audio stream could not supply the audio bed."""
+    assets[VIDEO_ID] = _asset(
+        VIDEO_ID,
+        "video",
+        duration_ms=20_000,
+        width=320,
+        height=240,
+        has_audio=True,
+        audio_duration_ms=20_000,
+    )
+    plan = valid_plan.model_copy(deep=True)
+    plan.audio.asset_id = VIDEO_ID
+
+    PlanValidator().validate(plan, assets)
 
 
 def test_plan_rejects_gap_between_shots(valid_plan, assets):

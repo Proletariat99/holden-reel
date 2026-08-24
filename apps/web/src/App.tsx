@@ -71,6 +71,7 @@ function validateSelection(saved: MediaSelection | undefined, assets: MediaSelec
     const asset = available.get(id);
     return asset?.kind === "video" || asset?.kind === "image";
   });
-  if (audio?.kind !== "audio" || visuals.length === 0) return null;
+  const audioIsUsable = audio?.kind === "audio" || (audio?.kind === "video" && audio.has_audio === true);
+  if (!audioIsUsable || visuals.length === 0) return null;
   return { assets: [...available.values()], audioAssetId: audio.id, visualAssetIds: visuals };
 }

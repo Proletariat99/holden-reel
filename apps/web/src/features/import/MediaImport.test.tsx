@@ -36,6 +36,8 @@ const assets: MediaAsset[] = [
     codec: "h264",
     available: true,
     fingerprint: "video-fingerprint",
+    has_audio: true,
+    audio_duration_ms: 4000,
   },
   {
     id: "v2",
@@ -50,6 +52,31 @@ const assets: MediaAsset[] = [
     fingerprint: "image-fingerprint",
   },
 ];
+
+it("offers embedded video audio and auto-selects the only soundtrack source", async () => {
+  // Break caught: a folder containing only a movie with sound cannot advance to a draft.
+  const movie = { ...assets[1], duration_ms: 60_000, audio_duration_ms: 60_000 };
+  const onReady = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <MediaImport
+      api={fakeApi({ listMedia: vi.fn().mockResolvedValue({ assets: [movie] }) })}
+      project={project}
+      onReady={onReady}
+    />,
+  );
+
+  const soundtrack = await screen.findByRole("radio", { name: /rehearsal\.mp4.*embedded audio/i });
+  expect(soundtrack).toBeChecked();
+  await user.click(screen.getByRole("checkbox", { name: /rehearsal\.mp4/i }));
+  await user.click(screen.getByRole("button", { name: /continue/i }));
+
+  expect(onReady).toHaveBeenCalledWith({
+    assets: [movie],
+    audioAssetId: "v1",
+    visualAssetIds: ["v1"],
+  });
+});
 
 function fakeApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {

@@ -126,5 +126,22 @@ def open_database(path: Path) -> sqlite3.Connection:
         )
         connection.execute("INSERT INTO schema_migrations (version) VALUES (4)")
 
+    migration = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = 5"
+    ).fetchone()
+    if migration is None:
+        connection.execute(
+            "ALTER TABLE media_assets ADD COLUMN has_audio INTEGER NOT NULL DEFAULT 0"
+        )
+        connection.execute("ALTER TABLE media_assets ADD COLUMN audio_duration_ms INTEGER")
+        connection.execute(
+            """
+            UPDATE media_assets
+            SET has_audio = 1, audio_duration_ms = duration_ms
+            WHERE kind = 'audio'
+            """
+        )
+        connection.execute("INSERT INTO schema_migrations (version) VALUES (5)")
+
     connection.commit()
     return connection

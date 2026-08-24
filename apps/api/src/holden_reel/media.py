@@ -25,6 +25,8 @@ class ProbeResult:
     width: int | None
     height: int | None
     codec: str | None
+    has_audio: bool = False
+    audio_duration_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,8 @@ class MediaAsset:
     codec: str | None
     available: bool
     fingerprint: str
+    has_audio: bool = False
+    audio_duration_ms: int | None = None
 
 
 class FFprobe:
@@ -73,9 +77,19 @@ class FFprobe:
         if path.suffix.casefold() in IMAGE_SUFFIXES and video_streams:
             return _probe_result("image", video_streams[0], None)
         format_duration = payload.get("format", {}).get("duration")
+        audio_stream = audio_streams[0] if audio_streams else None
+        audio_duration = (
+            audio_stream.get("duration") or format_duration if audio_stream is not None else None
+        )
         timed_video = next((stream for stream in video_streams if not _is_single_frame(stream)), None)
         if timed_video is not None:
-            return _probe_result("video", timed_video, timed_video.get("duration") or format_duration)
+            return _probe_result(
+                "video",
+                timed_video,
+                timed_video.get("duration") or format_duration,
+                audio_stream=audio_stream,
+                audio_duration=audio_duration,
+            )
         image_stream = next(
             (stream for stream in video_streams if _is_single_frame(stream) or path.suffix.casefold() in IMAGE_SUFFIXES),
             None,
@@ -85,7 +99,9 @@ class FFprobe:
         if audio_streams:
             audio_stream = audio_streams[0]
             duration = audio_stream.get("duration") or payload.get("format", {}).get("duration")
-            return _probe_result("audio", audio_stream, duration)
+            return _probe_result(
+                "audio", audio_stream, duration, audio_stream=audio_stream, audio_duration=duration
+            )
         return ProbeResult("unsupported_media", None, None, None, None)
 
 
@@ -107,13 +123,22 @@ def _is_attached_picture(stream: dict) -> bool:
     return bool(stream.get("disposition", {}).get("attached_pic"))
 
 
-def _probe_result(kind: str, stream: dict, duration: object) -> ProbeResult:
+def _probe_result(
+    kind: str,
+    stream: dict,
+    duration: object,
+    *,
+    audio_stream: dict | None = None,
+    audio_duration: object = None,
+) -> ProbeResult:
     return ProbeResult(
         kind=kind,
         duration_ms=_duration_ms(duration),
         width=stream.get("width"),
         height=stream.get("height"),
         codec=stream.get("codec_name"),
+        has_audio=audio_stream is not None,
+        audio_duration_ms=_duration_ms(audio_duration),
     )
 
 
@@ -132,22 +157,25 @@ class MediaRepository:
                 connection.execute(
                     """
                     UPDATE media_assets SET kind = ?, duration_ms = ?, width = ?, height = ?, codec = ?,
-                    available = ?, size_bytes = ?, modified_ns = ?, fingerprint = ? WHERE id = ?
+                    available = ?, size_bytes = ?, modified_ns = ?, fingerprint = ?,
+                    has_audio = ?, audio_duration_ms = ? WHERE id = ?
                     """,
                     (asset.kind, asset.duration_ms, asset.width, asset.height, asset.codec,
-                     int(asset.available), size_bytes, modified_ns, asset.fingerprint, str(asset.id)),
+                     int(asset.available), size_bytes, modified_ns, asset.fingerprint,
+                     int(asset.has_audio), asset.audio_duration_ms, str(asset.id)),
                 )
             else:
                 connection.execute(
                     """
                     INSERT INTO media_assets (
                       id, project_id, path, kind, duration_ms, width, height, codec,
-                      available, size_bytes, modified_ns, fingerprint
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      available, size_bytes, modified_ns, fingerprint, has_audio, audio_duration_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (str(asset.id), str(asset.project_id), str(asset.path), asset.kind,
                      asset.duration_ms, asset.width, asset.height, asset.codec, int(asset.available),
-                     size_bytes, modified_ns, asset.fingerprint),
+                     size_bytes, modified_ns, asset.fingerprint, int(asset.has_audio),
+                     asset.audio_duration_ms),
                 )
         return asset
 
@@ -170,7 +198,8 @@ class MediaRepository:
             id=UUID(row["id"]), project_id=UUID(row["project_id"]), path=Path(row["path"]),
             kind=row["kind"], duration_ms=row["duration_ms"], width=row["width"],
             height=row["height"], codec=row["codec"], available=bool(row["available"]),
-            fingerprint=row["fingerprint"],
+            fingerprint=row["fingerprint"], has_audio=bool(row["has_audio"]),
+            audio_duration_ms=row["audio_duration_ms"],
         )
 
 
@@ -179,6 +208,7 @@ def _asset_fields(asset: MediaAsset) -> dict:
         "project_id": asset.project_id, "path": asset.path, "kind": asset.kind,
         "duration_ms": asset.duration_ms, "width": asset.width, "height": asset.height,
         "codec": asset.codec, "available": asset.available, "fingerprint": asset.fingerprint,
+        "has_audio": asset.has_audio, "audio_duration_ms": asset.audio_duration_ms,
     }
 
 
@@ -207,6 +237,7 @@ class MediaService:
                 id=uuid4(), project_id=project_id, path=candidate, kind=probe.kind,
                 duration_ms=probe.duration_ms, width=probe.width, height=probe.height, codec=probe.codec,
                 available=True, fingerprint=_fingerprint(candidate, stat.st_size, stat.st_mtime_ns),
+                has_audio=probe.has_audio, audio_duration_ms=probe.audio_duration_ms,
             )
             assets.append(self.repository.save(asset, stat.st_size, stat.st_mtime_ns))
         return assets

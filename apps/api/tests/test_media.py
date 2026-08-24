@@ -26,13 +26,22 @@ def test_ffprobe_timeout_is_actionable(monkeypatch, tmp_path):
 
 
 def test_ffprobe_classifies_generated_webm_and_covered_audio(tmp_path, ffmpeg_bins):
-    """Would fail if container duration fallback or cover art were mistaken for still media."""
+    """Would fail if video audio or container duration metadata were lost during probing."""
     ffmpeg, ffprobe = ffmpeg_bins
     webm = tmp_path / "clip.webm"
     mp3 = tmp_path / "covered.mp3"
     m4a = tmp_path / "covered.m4a"
     cover = tmp_path / "cover.png"
-    subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=red:s=64x64:d=1.25", "-c:v", "libvpx-vp9", str(webm)], check=True, capture_output=True, timeout=20)
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-f", "lavfi", "-i", "color=red:s=64x64:d=1.25",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1.25",
+            "-c:v", "libvpx-vp9", "-c:a", "libopus", "-shortest", str(webm),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=20,
+    )
     subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "color=blue:s=64x64", "-frames:v", "1", str(cover)], check=True, capture_output=True, timeout=20)
     for output, codec in ((mp3, "libmp3lame"), (m4a, "aac")):
         subprocess.run([ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-i", str(cover), "-map", "0:a", "-map", "1:v", "-c:a", codec, "-c:v", "png", "-disposition:v", "attached_pic", str(output)], check=True, capture_output=True, timeout=20)
@@ -40,10 +49,15 @@ def test_ffprobe_classifies_generated_webm_and_covered_audio(tmp_path, ffmpeg_bi
     webm_result = probe.probe(webm)
     assert webm_result.kind == "video"
     assert webm_result.duration_ms is not None and abs(webm_result.duration_ms - 1250) < 100
+    assert webm_result.has_audio is True
+    assert webm_result.audio_duration_ms is not None
+    assert abs(webm_result.audio_duration_ms - 1250) < 100
     for path in (mp3, m4a):
         result = probe.probe(path)
         assert result.kind == "audio"
+        assert result.has_audio is True
         assert result.duration_ms is not None and abs(result.duration_ms - 2000) < 100
+        assert result.audio_duration_ms == result.duration_ms
 
 
 def test_ffprobe_extracts_stream_metadata(media_fixture):

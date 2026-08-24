@@ -83,8 +83,8 @@ class FFmpegCompiler:
             visual_labels.append(f"[v{index}]")
 
         audio = _required_asset(by_id, plan.audio.asset_id)
-        if audio.kind != "audio":
-            raise ValueError("audio bed must reference audio media")
+        if audio.kind != "audio" and not (audio.kind == "video" and audio.has_audio):
+            raise ValueError("audio bed must reference media with audio")
         audio_index = len(plan.shots)
         command.extend(["-i", str(audio.path)])
         filters.append(

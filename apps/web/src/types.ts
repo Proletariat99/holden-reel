@@ -18,6 +18,8 @@ export interface MediaAsset {
   codec: string | null;
   available: boolean;
   fingerprint: string;
+  has_audio?: boolean;
+  audio_duration_ms?: number | null;
 }
 
 export interface MediaCollection {

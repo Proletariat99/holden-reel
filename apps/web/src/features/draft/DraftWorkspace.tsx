@@ -409,8 +409,11 @@ function validateAudioStart(
   const seconds = Number(rawSeconds);
   if (!Number.isFinite(seconds) || seconds < 0) return "Audio start must be zero or greater.";
   const startMs = Math.round(seconds * 1000);
-  if (audioAsset?.duration_ms !== null && audioAsset?.duration_ms !== undefined) {
-    if (startMs + durationMs > audioAsset.duration_ms) {
+  const audioDurationMs = audioAsset?.kind === "video"
+    ? audioAsset.audio_duration_ms
+    : audioAsset?.audio_duration_ms ?? audioAsset?.duration_ms;
+  if (audioDurationMs !== null && audioDurationMs !== undefined) {
+    if (startMs + durationMs > audioDurationMs) {
       return `Audio start must leave enough room for a ${durationMs / 1000}-second reel in this track.`;
     }
   }

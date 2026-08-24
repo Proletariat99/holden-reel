@@ -98,6 +98,25 @@ def test_artifact_store_builds_only_safe_uncreated_paths(tmp_path):
     assert not final.exists()
 
 
+def test_compiler_uses_an_embedded_video_stream_as_the_audio_bed(command_assets, valid_plan, tmp_path):
+    """Would fail if FFmpeg accepted only standalone audio assets as soundtrack inputs."""
+    command_assets[RED_ID] = _asset(
+        RED_ID,
+        command_assets[RED_ID].path,
+        "video",
+        18_000,
+        has_audio=True,
+        audio_duration_ms=18_000,
+    )
+    plan = valid_plan.model_copy(deep=True)
+    plan.audio.asset_id = RED_ID
+
+    command = FFmpegCompiler("ffmpeg").compile(plan, command_assets, PREVIEW, tmp_path / "preview.mp4")
+
+    assert command.count(str(command_assets[RED_ID].path)) == 3
+    assert f"[{len(plan.shots)}:a]" in command[command.index("-filter_complex") + 1]
+
+
 @pytest.mark.parametrize(
     ("kind", "artifact_id", "suffix"),
     [
@@ -587,6 +606,8 @@ def _asset(
     duration_ms: int | None,
     width: int | None = 320,
     height: int | None = 240,
+    has_audio: bool | None = None,
+    audio_duration_ms: int | None = None,
 ) -> MediaAsset:
     return MediaAsset(
         id=asset_id,
@@ -599,6 +620,8 @@ def _asset(
         codec="fixture",
         available=True,
         fingerprint="fixture",
+        has_audio=kind == "audio" if has_audio is None else has_audio,
+        audio_duration_ms=duration_ms if kind == "audio" else audio_duration_ms,
     )
 
 

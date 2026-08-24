@@ -70,8 +70,9 @@ class PlanValidator:
             violations.append("referenced assets must be available")
 
         audio_asset = by_id.get(plan.audio.asset_id)
-        if audio_asset is not None and audio_asset.kind != "audio":
-            violations.append("audio bed must reference an audio asset")
+        audio_duration = _audio_duration(audio_asset)
+        if audio_asset is not None and audio_duration is None:
+            violations.append("audio bed must reference media with audio")
         times_are_nonnegative = not (
             plan.audio.source_start_ms < 0
             or plan.audio.source_end_ms < 0
@@ -89,8 +90,8 @@ class PlanValidator:
             violations.append("audio source range must have positive duration")
         if (
             audio_asset is not None
-            and audio_asset.duration_ms is not None
-            and plan.audio.source_end_ms > audio_asset.duration_ms
+            and audio_duration is not None
+            and plan.audio.source_end_ms > audio_duration
         ):
             violations.append("audio source range must fit asset duration")
         if plan.audio.source_end_ms - plan.audio.source_start_ms < plan.duration_ms:
@@ -193,13 +194,13 @@ class PlanService:
         assets = self.media.list(project_id)
         by_id = {asset.id: asset for asset in assets}
         audio = by_id.get(request.audio_asset_id)
+        audio_duration = _audio_duration(audio)
         if (
             audio is None
             or not audio.available
-            or audio.kind != "audio"
-            or audio.duration_ms is None
+            or audio_duration is None
             or request.audio_start_ms < 0
-            or request.audio_start_ms + request.duration_ms > audio.duration_ms
+            or request.audio_start_ms + request.duration_ms > audio_duration
         ):
             raise _insufficient_media()
 
@@ -283,3 +284,13 @@ def _insufficient_media() -> DomainError:
         "Usable media cannot cover the requested reel",
         status_code=422,
     )
+
+
+def _audio_duration(asset: MediaAsset | None) -> int | None:
+    if asset is None:
+        return None
+    if asset.kind == "audio":
+        return asset.audio_duration_ms or asset.duration_ms
+    if asset.kind == "video" and asset.has_audio:
+        return asset.audio_duration_ms
+    return None

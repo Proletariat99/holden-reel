@@ -63,7 +63,7 @@ export function MediaImport({ api, project, onReady }: MediaImportProps) {
     );
   }
 
-  const audioAssets = assets.filter((asset) => asset.kind === "audio");
+  const audioAssets = assets.filter(isAudioCapable);
   const visualAssets = assets.filter((asset) => asset.kind === "video" || asset.kind === "image");
   const selectedAudio = audioAssets.find((asset) => asset.available && asset.id === audioAssetId);
   const selectedVisuals = visualAssets.filter(
@@ -75,9 +75,11 @@ export function MediaImport({ api, project, onReady }: MediaImportProps) {
   function updateCatalog(nextAssets: MediaAsset[]) {
     setAssets(nextAssets);
     setAudioAssetId((current) =>
-      nextAssets.some((asset) => asset.id === current && asset.kind === "audio" && asset.available)
+      nextAssets.some((asset) => asset.id === current && isAudioCapable(asset) && asset.available)
         ? current
-        : "",
+        : nextAssets.filter((asset) => asset.available && isAudioCapable(asset)).length === 1
+          ? nextAssets.find((asset) => asset.available && isAudioCapable(asset))!.id
+          : "",
     );
     setVisualAssetIds((current) =>
       current.filter((id) =>
@@ -130,8 +132,8 @@ export function MediaImport({ api, project, onReady }: MediaImportProps) {
       {!isLoading ? (
         <div className="media-sections">
           <MediaGroup
-            title="Choose one audio track"
-            empty="Import a folder with an audio file to choose a track."
+            title="Choose one soundtrack"
+            empty="Import audio or a video with embedded audio to choose a soundtrack."
             assets={audioAssets}
             selectionType="audio"
             selectedIds={audioAssetId ? [audioAssetId] : []}
@@ -190,7 +192,7 @@ function MediaGroup({ title, empty, assets, selectionType, selectedIds, onSelect
               />
               <span className="media-card-body">
                 <span className="media-name">{fileName(asset.path)}</span>
-                <span className="media-details">{mediaDetails(asset)}</span>
+                <span className="media-details">{mediaDetails(asset, selectionType)}</span>
                 {!asset.available ? <span className="offline-badge">Offline</span> : null}
               </span>
             </label>
@@ -206,11 +208,22 @@ function fileName(path: string): string {
   return parts.at(-1) || path;
 }
 
-function mediaDetails(asset: MediaAsset): string {
+function mediaDetails(asset: MediaAsset, selectionType: "audio" | "visual"): string {
+  if (selectionType === "audio" && asset.kind === "video") {
+    const parts = ["embedded audio"];
+    if (asset.audio_duration_ms !== null && asset.audio_duration_ms !== undefined) {
+      parts.push(formatDuration(asset.audio_duration_ms));
+    }
+    return parts.join(" · ");
+  }
   const parts: string[] = [asset.kind];
   if (asset.width !== null && asset.height !== null) parts.push(`${asset.width} × ${asset.height}`);
   if (asset.duration_ms !== null) parts.push(formatDuration(asset.duration_ms));
   return parts.join(" · ");
+}
+
+function isAudioCapable(asset: MediaAsset): boolean {
+  return asset.kind === "audio" || (asset.kind === "video" && asset.has_audio === true);
 }
 
 function formatDuration(durationMs: number): string {
