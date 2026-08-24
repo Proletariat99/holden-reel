@@ -17,9 +17,10 @@ interface DraftWorkspaceProps {
   api: ApiClient;
   project: Project;
   selection: MediaSelection;
+  onBack?: () => void;
 }
 
-export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps) {
+export function DraftWorkspace({ api, project, selection, onBack }: DraftWorkspaceProps) {
   const [durationMs, setDurationMs] = useState<15000 | 30000>(15000);
   const [audioStartSeconds, setAudioStartSeconds] = useState("0");
   const [visualAssetIds, setVisualAssetIds] = useState(selection.visualAssetIds);
@@ -176,6 +177,16 @@ export function DraftWorkspace({ api, project, selection }: DraftWorkspaceProps)
 
   return (
     <section className="guided-screen draft-workspace" aria-labelledby="draft-heading">
+      {onBack ? (
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={contentLocked}
+          onClick={onBack}
+        >
+          Back to media selection
+        </button>
+      ) : null}
       <p className="eyebrow">Draft workspace</p>
       <h2 id="draft-heading" className="screen-heading">Shape the reel, then render it</h2>
       <p className="intro">Choose the timing and source order. The same saved plan drives both preview and final export.</p>

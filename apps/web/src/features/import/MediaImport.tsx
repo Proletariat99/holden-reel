@@ -5,14 +5,17 @@ import type { ApiClient, MediaAsset, MediaSelection, Project } from "../../types
 interface MediaImportProps {
   api: ApiClient;
   project: Project;
+  initialSelection?: MediaSelection | null;
   onReady: (selection: MediaSelection) => void;
 }
 
-export function MediaImport({ api, project, onReady }: MediaImportProps) {
+export function MediaImport({ api, project, initialSelection, onReady }: MediaImportProps) {
   const [path, setPath] = useState("");
   const [assets, setAssets] = useState<MediaAsset[]>([]);
-  const [audioAssetId, setAudioAssetId] = useState("");
-  const [visualAssetIds, setVisualAssetIds] = useState<string[]>([]);
+  const [audioAssetId, setAudioAssetId] = useState(initialSelection?.audioAssetId ?? "");
+  const [visualAssetIds, setVisualAssetIds] = useState<string[]>(
+    initialSelection?.visualAssetIds ?? [],
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);

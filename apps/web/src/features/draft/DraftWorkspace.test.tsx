@@ -149,11 +149,12 @@ it("prevents regeneration from abandoning an active preview or final render", as
   });
   previewApi.getJob = vi.fn().mockReturnValue(previewRefresh.promise);
   const previewView = render(
-    <DraftWorkspace api={previewApi} project={project} selection={selection} />,
+    <DraftWorkspace api={previewApi} project={project} selection={selection} onBack={vi.fn()} />,
   );
   await user.click(screen.getByRole("button", { name: /generate draft/i }));
   const previewGenerate = screen.getByRole("button", { name: /generate draft/i });
   expect(previewGenerate).toBeDisabled();
+  expect(screen.getByRole("button", { name: /back to media selection/i })).toBeDisabled();
   previewRefresh.resolve(renderJob({ status: "running", progress: 0.42 }));
   await screen.findByRole("button", { name: /cancel preview/i });
 

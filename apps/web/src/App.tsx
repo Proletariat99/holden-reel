@@ -11,6 +11,7 @@ export default function App() {
   const api = useMemo(() => new ApiClient(), []);
   const [project, setProject] = useState<Project | null>(null);
   const [selection, setSelection] = useState<MediaSelection | null>(null);
+  const [isSelectingMedia, setIsSelectingMedia] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
 
   useEffect(() => {
@@ -33,11 +34,13 @@ export default function App() {
   function openProject(next: Project) {
     setProject(next);
     setSelection(null);
+    setIsSelectingMedia(true);
     saveActiveWorkspace({ projectId: next.id });
   }
 
   function openSelection(next: MediaSelection) {
     setSelection(next);
+    setIsSelectingMedia(false);
     saveActiveWorkspace({ projectId: project!.id, selection: next });
   }
 
@@ -51,10 +54,20 @@ export default function App() {
         {project ? <p className="muted">{project.name}</p> : null}
       </header>
       {isRestoring ? <p className="muted" role="status">Restoring your workspace…</p> : project ? (
-        selection ? (
-          <DraftWorkspace api={api} project={project} selection={selection} />
+        selection && !isSelectingMedia ? (
+          <DraftWorkspace
+            api={api}
+            project={project}
+            selection={selection}
+            onBack={() => setIsSelectingMedia(true)}
+          />
         ) : (
-          <MediaImport api={api} project={project} onReady={openSelection} />
+          <MediaImport
+            api={api}
+            project={project}
+            initialSelection={selection}
+            onReady={openSelection}
+          />
         )
       ) : (
         <ProjectStart api={api} onOpen={openProject} />

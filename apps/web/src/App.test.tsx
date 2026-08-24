@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import App from "./App";
@@ -25,6 +26,32 @@ test("restores a validated active project and media selection after reload", asy
   render(<App />);
   expect(await screen.findByRole("heading", { name: /shape the reel/i })).toBeInTheDocument();
   expect(screen.getByText("Restored")).toBeInTheDocument();
+});
+
+test("returns from the draft to media selection without losing checked sources", async () => {
+  // Break caught: entering the draft traps the user or discards their current media choices.
+  const user = userEvent.setup();
+  const saved = {
+    assets: [
+      { id: "a1", project_id: "p1", path: "/song.wav", kind: "audio", duration_ms: 60000, width: null, height: null, codec: "pcm", available: true, fingerprint: "a" },
+      { id: "v1", project_id: "p1", path: "/clip.mp4", kind: "video", duration_ms: 10000, width: 320, height: 240, codec: "h264", available: true, fingerprint: "v" },
+    ],
+    audioAssetId: "a1",
+    visualAssetIds: ["v1"],
+  };
+  localStorage.setItem("holden-reel.active", JSON.stringify({ projectId: "p1", selection: saved }));
+  vi.stubGlobal("fetch", vi.fn((url: string) => Promise.resolve(new Response(JSON.stringify(
+    url.includes("/media") ? { assets: saved.assets } : { id: "p1", name: "Editable", created_at: "x", updated_at: "x" },
+  ), { status: 200, headers: { "Content-Type": "application/json" } }))));
+  render(<App />);
+
+  await user.click(await screen.findByRole("button", { name: /back to media selection/i }));
+
+  expect(screen.getByRole("heading", { name: /bring in your local media/i })).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: /song\.wav/i })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: /clip\.mp4/i })).toBeChecked();
+  await user.click(screen.getByRole("button", { name: /continue/i }));
+  expect(await screen.findByRole("heading", { name: /shape the reel/i })).toBeInTheDocument();
 });
 
 test("restores a video selected for both embedded audio and visuals", async () => {
