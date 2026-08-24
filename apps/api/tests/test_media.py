@@ -12,9 +12,17 @@ from holden_reel.focus import FOCUS_ANALYZER_VERSION, center_focus
 from holden_reel.media import FFprobe
 
 
-def test_migration_6_adds_nullable_focus_columns_without_altering_old_rows(tmp_path):
-    """Would fail if migration 6 omitted metadata or rewrote a version-5 asset."""
-    database_path = tmp_path / "version-5.sqlite3"
+FOCUS_COLUMNS = {
+    "focus_x",
+    "focus_y",
+    "focus_confidence",
+    "focus_method",
+    "focus_analyzer_version",
+    "focus_fingerprint",
+}
+
+
+def _create_version_5_database(database_path: Path):
     project_id = uuid4()
     asset_id = uuid4()
     connection = sqlite3.connect(database_path)
@@ -62,6 +70,13 @@ def test_migration_6_adds_nullable_focus_columns_without_altering_old_rows(tmp_p
     )
     connection.commit()
     connection.close()
+    return project_id, asset_id
+
+
+def test_migration_6_adds_nullable_focus_columns_without_altering_old_rows(tmp_path):
+    """Would fail if migration 6 omitted metadata or rewrote a version-5 asset."""
+    database_path = tmp_path / "version-5.sqlite3"
+    project_id, asset_id = _create_version_5_database(database_path)
 
     migrated = open_database(database_path)
     columns = {
@@ -74,14 +89,7 @@ def test_migration_6_adds_nullable_focus_columns_without_altering_old_rows(tmp_p
         "SELECT version FROM schema_migrations WHERE version = 6"
     ).fetchall()
 
-    assert {
-        "focus_x",
-        "focus_y",
-        "focus_confidence",
-        "focus_method",
-        "focus_analyzer_version",
-        "focus_fingerprint",
-    } <= columns
+    assert FOCUS_COLUMNS <= columns
     assert tuple(row[:14]) == (
         str(asset_id),
         str(project_id),
@@ -101,6 +109,63 @@ def test_migration_6_adds_nullable_focus_columns_without_altering_old_rows(tmp_p
     assert tuple(row[14:]) == (None, None, None, None, None, None)
     assert [version["version"] for version in versions] == [6]
     migrated.close()
+
+
+def test_migration_6_rolls_back_partial_failure_and_succeeds_on_reopen(
+    tmp_path, monkeypatch
+):
+    """Would fail if interrupted DDL stranded partial columns without version 6."""
+    database_path = tmp_path / "interrupted-version-5.sqlite3"
+    _create_version_5_database(database_path)
+    real_connect = sqlite3.connect
+    failure_pending = True
+    opened_connections = []
+
+    class FailingMigrationConnection(sqlite3.Connection):
+        def execute(self, query, parameters=()):
+            nonlocal failure_pending
+            if failure_pending and query == (
+                "ALTER TABLE media_assets ADD COLUMN focus_y REAL"
+            ):
+                failure_pending = False
+                raise sqlite3.OperationalError("injected migration failure")
+            return super().execute(query, parameters)
+
+    def connect_with_one_failure(*args, **kwargs):
+        kwargs["factory"] = FailingMigrationConnection
+        connection = real_connect(*args, **kwargs)
+        opened_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr("holden_reel.db.sqlite3.connect", connect_with_one_failure)
+
+    with pytest.raises(sqlite3.OperationalError, match="injected migration failure"):
+        open_database(database_path)
+    opened_connections[-1].close()
+
+    with real_connect(database_path) as inspection:
+        columns_after_failure = {
+            row[1]
+            for row in inspection.execute("PRAGMA table_info(media_assets)").fetchall()
+        }
+        version_after_failure = inspection.execute(
+            "SELECT version FROM schema_migrations WHERE version = 6"
+        ).fetchall()
+
+    assert FOCUS_COLUMNS.isdisjoint(columns_after_failure)
+    assert version_after_failure == []
+
+    reopened = open_database(database_path)
+    columns_after_reopen = {
+        row[1] for row in reopened.execute("PRAGMA table_info(media_assets)").fetchall()
+    }
+    versions_after_reopen = reopened.execute(
+        "SELECT version FROM schema_migrations WHERE version = 6"
+    ).fetchall()
+
+    assert FOCUS_COLUMNS <= columns_after_reopen
+    assert [version["version"] for version in versions_after_reopen] == [6]
+    reopened.close()
 
 
 def test_repository_finds_imported_asset_by_resolved_path(media_service_harness, tmp_path):
