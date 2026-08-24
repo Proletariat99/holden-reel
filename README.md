@@ -17,6 +17,32 @@ postable Reel in under 10 minutes.
 > reel plan, renders playable previews, and exports verified MP4 files. The
 > constrained creative agent and guided refinement remain future work.
 
+## Quick start
+
+You need Node.js 22, pnpm 10, `uv`, Python 3.12, FFmpeg, and FFprobe.
+From the repository root, install the locked dependencies once:
+
+```bash
+corepack enable
+pnpm install --frozen-lockfile
+cd apps/api
+uv python install 3.12
+uv sync --python 3.12 --frozen
+cd ../..
+```
+
+Then start Holden Reel:
+
+```bash
+make dev
+```
+
+Open <http://127.0.0.1:5173> in your browser. The API runs at
+<http://127.0.0.1:8000>. Stop both processes with `Ctrl-C`.
+
+For test commands, optional configuration, and troubleshooting, see the
+[local development guide](docs/development.md).
+
 ## Product principles
 
 - **Local first.** Source media stays on the user's machine by default.
