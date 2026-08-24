@@ -143,6 +143,16 @@ def test_plan_requires_final_shot_to_end_at_reel_duration(valid_plan, assets):
     assert "shots must end at output duration" in error.value.details["violations"]
 
 
+def test_plan_rejects_empty_shot_timeline(valid_plan, assets):
+    """Would fail if an empty visual timeline could claim to cover the reel duration."""
+    broken = valid_plan.model_copy(update={"shots": []})
+
+    with pytest.raises(DomainError) as error:
+        PlanValidator().validate(broken, assets)
+
+    assert error.value.details["violations"] == ["shots must end at output duration"]
+
+
 @pytest.mark.parametrize(("field", "value"), [("focus_x", -0.01), ("focus_x", 1.01), ("focus_y", -0.01), ("focus_y", 1.01)])
 def test_shot_rejects_focus_coordinates_outside_unit_interval(field, value):
     """Would fail if a persisted crop target could fall outside the source frame."""

@@ -126,7 +126,7 @@ class PlanValidator:
             if shot.output_end_ms - shot.output_start_ms <= overlap_ms:
                 violations.append("shots must be longer than the transition overlap")
             expected_start = shot.output_end_ms - overlap_ms
-        if plan.shots and plan.shots[-1].output_end_ms != plan.duration_ms:
+        if not plan.shots or plan.shots[-1].output_end_ms != plan.duration_ms:
             violations.append("shots must end at output duration")
 
         for shot in plan.shots:
