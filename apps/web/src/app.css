@@ -292,6 +292,12 @@ a:focus-visible {
   margin: 0;
 }
 
+.draft-choice-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
 .choice-group {
   display: flex;
   flex-wrap: wrap;
@@ -409,6 +415,10 @@ a:focus-visible {
   }
 
   .draft-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .draft-choice-groups {
     grid-template-columns: 1fr;
   }
 }

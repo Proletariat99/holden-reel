@@ -42,6 +42,7 @@ const plan: ReelPlan = {
   height: 1920,
   fps: 30,
   safe_area: "instagram_reels_v1",
+  transition_style: "cut",
   audio: { asset_id: "a1", source_start_ms: 2500, source_end_ms: 32500, gain_db: 0 },
   shots: [
     {
@@ -52,6 +53,9 @@ const plan: ReelPlan = {
       output_end_ms: 15_000,
       fit: "cover",
       still_motion: "slow_zoom",
+      focus_x: 0.5,
+      focus_y: 0.5,
+      focus_method: "center",
     },
     {
       asset_id: "v1",
@@ -61,6 +65,9 @@ const plan: ReelPlan = {
       output_end_ms: 30_000,
       fit: "cover",
       still_motion: null,
+      focus_x: 0.5,
+      focus_y: 0.5,
+      focus_method: "center",
     },
   ],
   rationale: "Deterministic visual rotation using supplied source order.",
@@ -73,19 +80,22 @@ it("composes a 15 or 30 second plan from numeric audio start and user-ordered vi
   render(<DraftWorkspace api={api} project={project} selection={selection} />);
 
   expect(screen.getByRole("radio", { name: /15 seconds/i })).toBeChecked();
+  expect(screen.getByRole("radio", { name: /clean cut/i })).toBeChecked();
   await user.click(screen.getByRole("radio", { name: /30 seconds/i }));
+  await user.click(screen.getByRole("radio", { name: /quick dissolve/i }));
   await user.clear(screen.getByLabelText(/audio start/i));
   await user.type(screen.getByLabelText(/audio start/i), "2.5");
   await user.click(screen.getByRole("button", { name: /move second.jpg up/i }));
   await user.click(screen.getByRole("button", { name: /generate draft/i }));
 
   await waitFor(() =>
-    expect(api.composePlan).toHaveBeenCalledWith("p1", {
+    expect(api.composePlan).toHaveBeenCalledWith("p1", expect.objectContaining({
       duration_ms: 30_000,
       audio_asset_id: "a1",
       audio_start_ms: 2500,
       visual_asset_ids: ["v2", "v1"],
-    }),
+      transition_style: "dissolve",
+    })),
   );
   expect(api.startRender).toHaveBeenCalledWith("plan1", "preview");
 });
@@ -121,6 +131,8 @@ it("shows the deterministic shot order and rationale before rendering completes"
   expect(items[0]).toHaveTextContent("0:00–0:15");
   expect(items[1]).toHaveTextContent("first.mp4");
   expect(items[1]).toHaveTextContent("0:15–0:30");
+  const planSummary = screen.getByRole("heading", { name: /draft plan/i }).parentElement!;
+  expect(within(planSummary).getByText("Clean cut")).toBeInTheDocument();
 });
 
 it("shows render progress and cancels the active preview", async () => {
@@ -160,6 +172,8 @@ it("prevents regeneration from abandoning an active preview or final render", as
 
   expect(previewGenerate).toBeDisabled();
   expect(screen.getByRole("radio", { name: /30 seconds/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /clean cut/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /quick dissolve/i })).toBeDisabled();
   expect(screen.getByLabelText(/audio start/i)).toBeDisabled();
   expect(screen.getByRole("button", { name: /move second.jpg up/i })).toBeDisabled();
   expect(screen.getByRole("status")).toHaveTextContent(/render is active.*cancel it or wait/i);
@@ -184,6 +198,8 @@ it("prevents regeneration from abandoning an active preview or final render", as
   const finalGenerate = screen.getByRole("button", { name: /generate draft/i });
   expect(finalGenerate).toBeDisabled();
   expect(screen.getByRole("radio", { name: /30 seconds/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /clean cut/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /quick dissolve/i })).toBeDisabled();
   expect(screen.getByLabelText(/audio start/i)).toBeDisabled();
   expect(screen.getByRole("button", { name: /move second.jpg up/i })).toBeDisabled();
   finalRefresh.resolve(runningFinal);
@@ -272,6 +288,7 @@ it("shows the backend ApiError code and message", async () => {
 
 it.each([
   ["duration", async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole("radio", { name: /30 seconds/i }))],
+  ["transition", async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole("radio", { name: /quick dissolve/i }))],
   ["audio start", async (user: ReturnType<typeof userEvent.setup>) => user.type(screen.getByLabelText(/audio start/i), "1")],
   ["visual order", async (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByRole("button", { name: /move second.jpg up/i }))],
 ])("invalidates a preview when %s changes", async (_label, mutate) => {
@@ -289,13 +306,16 @@ it.each([
 
 it("restores and resumes polling an active saved render job after refresh", async () => {
   // Break caught: React-only identifiers disappear on browser reload.
+  const dissolvePlan: ReelPlan = { ...plan, transition_style: "dissolve" };
   localStorage.setItem("holden-reel.active", JSON.stringify({
     projectId: "p1", selection, planId: "plan1", previewJobId: "preview1",
   }));
   const api = fakeApi({ previewJob: renderJob({ status: "running", progress: 0.42 }) });
-  api.getPlan = vi.fn().mockResolvedValue(plan);
+  api.getPlan = vi.fn().mockResolvedValue(dissolvePlan);
   render(<DraftWorkspace api={api} project={project} selection={selection} />);
-  expect(await screen.findByText(plan.rationale)).toBeInTheDocument();
+  expect(await screen.findByText(dissolvePlan.rationale)).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: /quick dissolve/i })).toBeChecked();
+  expect(screen.getByText("Quick dissolve · 200 ms")).toBeInTheDocument();
   expect(await screen.findByRole("progressbar", { name: /preview render progress/i })).toHaveAttribute("value", "0.42");
   expect(screen.getByRole("button", { name: /cancel preview/i })).toBeInTheDocument();
   expect(api.getPlan).toHaveBeenCalledWith("plan1");

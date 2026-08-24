@@ -1,4 +1,6 @@
 export type MediaKind = "audio" | "video" | "image";
+export type FocusMethod = "face" | "person" | "motion" | "contrast" | "center";
+export type TransitionStyle = "cut" | "dissolve";
 
 export interface Project {
   id: string;
@@ -20,6 +22,12 @@ export interface MediaAsset {
   fingerprint: string;
   has_audio?: boolean;
   audio_duration_ms?: number | null;
+  focus_x?: number | null;
+  focus_y?: number | null;
+  focus_confidence?: number | null;
+  focus_method?: FocusMethod | null;
+  focus_analyzer_version?: number | null;
+  focus_fingerprint?: string | null;
 }
 
 export interface MediaCollection {
@@ -58,6 +66,7 @@ export interface ComposePlanRequest {
   audio_asset_id: string;
   audio_start_ms: number;
   visual_asset_ids: string[];
+  transition_style: TransitionStyle;
 }
 
 export interface ReelShot {
@@ -68,6 +77,9 @@ export interface ReelShot {
   output_end_ms: number;
   fit: "cover";
   still_motion: "slow_zoom" | null;
+  focus_x: number;
+  focus_y: number;
+  focus_method: FocusMethod;
 }
 
 export interface ReelPlan {
@@ -80,6 +92,7 @@ export interface ReelPlan {
   height: 1920;
   fps: 30;
   safe_area: "instagram_reels_v1";
+  transition_style: TransitionStyle;
   audio: {
     asset_id: string;
     source_start_ms: number;

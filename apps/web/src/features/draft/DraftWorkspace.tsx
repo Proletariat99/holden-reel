@@ -9,6 +9,7 @@ import type {
   ReelPlan,
   RenderJob,
   RenderProfile,
+  TransitionStyle,
 } from "../../types";
 import { useJob } from "../../useJob";
 import { loadActiveWorkspace, saveActiveWorkspace } from "../../workspaceStorage";
@@ -22,6 +23,7 @@ interface DraftWorkspaceProps {
 
 export function DraftWorkspace({ api, project, selection, onBack }: DraftWorkspaceProps) {
   const [durationMs, setDurationMs] = useState<15000 | 30000>(15000);
+  const [transitionStyle, setTransitionStyle] = useState<TransitionStyle>("cut");
   const [audioStartSeconds, setAudioStartSeconds] = useState("0");
   const [visualAssetIds, setVisualAssetIds] = useState(selection.visualAssetIds);
   const [plan, setPlan] = useState<ReelPlan | null>(null);
@@ -49,6 +51,7 @@ export function DraftWorkspace({ api, project, selection, onBack }: DraftWorkspa
     setPreviewJobId(null);
     setFinalJobId(null);
     setDurationMs(15000);
+    setTransitionStyle("cut");
     setAudioStartSeconds("0");
     setVisualAssetIds(selection.visualAssetIds);
     setStaleMessage(null);
@@ -67,6 +70,7 @@ export function DraftWorkspace({ api, project, selection, onBack }: DraftWorkspa
       if (!isCurrent || restorationEpoch.current !== epoch) return;
       setPlan(restoredPlan);
       setDurationMs(restoredPlan.duration_ms);
+      setTransitionStyle(restoredPlan.transition_style);
       setAudioStartSeconds(String(restoredPlan.audio.source_start_ms / 1000));
       setVisualAssetIds([...new Set(restoredPlan.shots.map((shot) => shot.asset_id))]);
       const previewJob = jobs[0].status === "fulfilled" ? jobs[0].value : null;
@@ -122,6 +126,7 @@ export function DraftWorkspace({ api, project, selection, onBack }: DraftWorkspa
         audio_asset_id: selection.audioAssetId,
         audio_start_ms: audioStartMs,
         visual_asset_ids: visualAssetIds,
+        transition_style: transitionStyle,
       });
       setPlan(composed);
       setStaleMessage(null);
@@ -194,29 +199,45 @@ export function DraftWorkspace({ api, project, selection, onBack }: DraftWorkspa
       <div className="draft-grid">
         <section className="panel stack" aria-labelledby="draft-settings-heading">
           <h3 id="draft-settings-heading">Draft settings</h3>
-          <fieldset className="choice-group">
-            <legend>Reel length</legend>
-            <label className="inline-choice">
-              <input
-                type="radio"
-                name="duration"
-                checked={durationMs === 15000}
-                disabled={contentLocked}
-                onChange={() => { if (!contentLocked) { invalidatePlan(); setDurationMs(15000); } }}
-              />
-              15 seconds
-            </label>
-            <label className="inline-choice">
-              <input
-                type="radio"
-                name="duration"
-                checked={durationMs === 30000}
-                disabled={contentLocked}
-                onChange={() => { if (!contentLocked) { invalidatePlan(); setDurationMs(30000); } }}
-              />
-              30 seconds
-            </label>
-          </fieldset>
+          <div className="draft-choice-groups">
+            <fieldset className="choice-group">
+              <legend>Reel length</legend>
+              <label className="inline-choice">
+                <input
+                  type="radio"
+                  name="duration"
+                  checked={durationMs === 15000}
+                  disabled={contentLocked}
+                  onChange={() => { if (!contentLocked) { invalidatePlan(); setDurationMs(15000); } }}
+                />
+                15 seconds
+              </label>
+              <label className="inline-choice">
+                <input
+                  type="radio"
+                  name="duration"
+                  checked={durationMs === 30000}
+                  disabled={contentLocked}
+                  onChange={() => { if (!contentLocked) { invalidatePlan(); setDurationMs(30000); } }}
+                />
+                30 seconds
+              </label>
+            </fieldset>
+
+            <fieldset className="choice-group">
+              <legend>Transition</legend>
+              <label className="inline-choice">
+                <input type="radio" name="transition" checked={transitionStyle === "cut"} disabled={contentLocked}
+                  onChange={() => { if (!contentLocked) { invalidatePlan(); setTransitionStyle("cut"); } }} />
+                Clean cut
+              </label>
+              <label className="inline-choice">
+                <input type="radio" name="transition" checked={transitionStyle === "dissolve"} disabled={contentLocked}
+                  onChange={() => { if (!contentLocked) { invalidatePlan(); setTransitionStyle("dissolve"); } }} />
+                Quick dissolve
+              </label>
+            </fieldset>
+          </div>
 
           <label htmlFor="audio-start">Audio start (seconds)</label>
           <input
@@ -366,6 +387,7 @@ function PlanSummary({ plan, assetsById }: { plan: ReelPlan; assetsById: Map<str
     <div className="plan-summary">
       <h3>Draft plan</h3>
       <p>{plan.rationale}</p>
+      <p className="muted">{plan.transition_style === "dissolve" ? "Quick dissolve · 200 ms" : "Clean cut"}</p>
       <ol aria-label="Ordered shot list" className="shot-list">
         {plan.shots.map((shot, index) => (
           <li key={`${shot.asset_id}-${shot.output_start_ms}-${index}`}>
