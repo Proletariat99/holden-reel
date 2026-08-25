@@ -213,8 +213,8 @@ def test_import_reuses_focus_until_the_source_fingerprint_changes(
     assert third.id == first.id
 
 
-def test_missing_and_stale_focus_versions_trigger_analysis(media_service_harness, tmp_path):
-    """Would fail if analyzer-version changes could reuse incompatible cached focus."""
+def test_missing_focus_version_triggers_analysis(media_service_harness, tmp_path):
+    """Would fail if an unversioned cached focus were treated as current."""
     source = (tmp_path / "clip.mp4").resolve()
     source.write_bytes(b"video")
     media_service_harness.service.import_path(media_service_harness.project_id, source)
@@ -228,17 +228,26 @@ def test_missing_and_stale_focus_versions_trigger_analysis(media_service_harness
         media_service_harness.project_id, source
     )[0]
 
+    assert len(media_service_harness.analyzer.calls) == 2
+    assert missing.focus_analyzer_version == FOCUS_ANALYZER_VERSION
+
+
+def test_version_one_focus_cache_triggers_analysis(media_service_harness, tmp_path):
+    """Would fail if algorithm-v1 focus survived the v2 analyzer cache boundary."""
+    source = (tmp_path / "clip.mp4").resolve()
+    source.write_bytes(b"video")
+    media_service_harness.service.import_path(media_service_harness.project_id, source)
+
     with media_service_harness.database.transaction() as connection:
         connection.execute(
             "UPDATE media_assets SET focus_analyzer_version = ? WHERE path = ?",
-            (FOCUS_ANALYZER_VERSION - 1, str(source)),
+            (1, str(source)),
         )
     stale = media_service_harness.service.import_path(
         media_service_harness.project_id, source
     )[0]
 
-    assert len(media_service_harness.analyzer.calls) == 3
-    assert missing.focus_analyzer_version == FOCUS_ANALYZER_VERSION
+    assert len(media_service_harness.analyzer.calls) == 2
     assert stale.focus_analyzer_version == FOCUS_ANALYZER_VERSION
 
 

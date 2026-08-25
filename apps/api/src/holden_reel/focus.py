@@ -11,7 +11,7 @@ from typing import Literal
 
 FocusMethod = Literal["face", "person", "motion", "contrast", "center"]
 
-FOCUS_ANALYZER_VERSION = 1
+FOCUS_ANALYZER_VERSION = 2
 MAX_VIDEO_FRAMES = 9
 MAX_FRAME_EDGE = 640
 FOCUS_TIMEOUT_SECONDS = 10

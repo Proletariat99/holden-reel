@@ -116,6 +116,55 @@ it("validates audio start against the chosen duration before composing", async (
   expect(api.composePlan).not.toHaveBeenCalled();
 });
 
+it("locks draft content while composition is pending", async () => {
+  // Break caught: settings can change while an older compose response is still pending.
+  const compose = deferred<ReelPlan>();
+  const api = fakeApi({ composePlan: vi.fn().mockReturnValue(compose.promise) });
+  const user = userEvent.setup();
+  render(
+    <DraftWorkspace api={api} project={project} selection={selection} onBack={vi.fn()} />,
+  );
+
+  await user.click(screen.getByRole("button", { name: /generate draft/i }));
+  await waitFor(() => expect(api.composePlan).toHaveBeenCalledTimes(1));
+
+  expect(screen.getByRole("button", { name: /back to media selection/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /30 seconds/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /quick dissolve/i })).toBeDisabled();
+  expect(screen.getByLabelText(/audio start/i)).toBeDisabled();
+  expect(screen.getByRole("button", { name: /move second.jpg up/i })).toBeDisabled();
+
+  compose.resolve(plan);
+  expect(await screen.findByLabelText(/reel preview/i)).toBeInTheDocument();
+});
+
+it("locks draft content while final render startup is pending", async () => {
+  // Break caught: settings can invalidate a plan before its final job ID is installed.
+  const finalStart = deferred<RenderJob>();
+  const api = fakeApi();
+  const startPreview = api.startRender;
+  api.startRender = vi.fn((planId, profile) =>
+    profile === "final" ? finalStart.promise : startPreview(planId, profile),
+  );
+  const user = userEvent.setup();
+  render(
+    <DraftWorkspace api={api} project={project} selection={selection} onBack={vi.fn()} />,
+  );
+
+  await user.click(screen.getByRole("button", { name: /generate draft/i }));
+  await user.click(await screen.findByRole("button", { name: /export final/i }));
+  await waitFor(() => expect(api.startRender).toHaveBeenCalledTimes(2));
+
+  expect(screen.getByRole("button", { name: /back to media selection/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /30 seconds/i })).toBeDisabled();
+  expect(screen.getByRole("radio", { name: /quick dissolve/i })).toBeDisabled();
+  expect(screen.getByLabelText(/audio start/i)).toBeDisabled();
+  expect(screen.getByRole("button", { name: /move second.jpg up/i })).toBeDisabled();
+
+  finalStart.resolve(renderJob({ id: "final1", kind: "final", status: "running" }));
+  expect(await screen.findByRole("button", { name: /cancel final export/i })).toBeInTheDocument();
+});
+
 it("shows the deterministic shot order and rationale before rendering completes", async () => {
   // Break caught: composition succeeds but users cannot inspect what will render or why.
   const api = fakeApi({ previewJob: renderJob({ status: "running", progress: 0.25 }) });

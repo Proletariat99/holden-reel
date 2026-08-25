@@ -87,12 +87,16 @@ def test_complete_http_workflow_exports_verified_final_without_modifying_sources
     assets_by_name = {Path(asset["path"]).name: asset for asset in assets}
     audio = next(asset for asset in assets if asset["kind"] == "audio")
     off_center = assets_by_name["off-center.mp4"]
+    off_center_still = assets_by_name["still.jpg"]
     left_red = assets_by_name["left-red.mp4"]
     right_blue = assets_by_name["right-blue.mp4"]
     assert off_center["focus_x"] < 0.35
     assert off_center["focus_method"] != "center"
+    assert off_center_still["focus_x"] < 0.35
+    assert off_center_still["focus_method"] == "contrast"
     visuals = [
         off_center,
+        off_center_still,
         left_red,
         right_blue,
     ]
@@ -127,6 +131,21 @@ def test_complete_http_workflow_exports_verified_final_without_modifying_sources
             off_center["focus_method"],
         )
         for shot in off_center_shots
+    )
+    off_center_still_shots = [
+        shot
+        for shot in persisted["shots"]
+        if shot["asset_id"] == off_center_still["id"]
+    ]
+    assert off_center_still_shots
+    assert all(
+        (shot["focus_x"], shot["focus_y"], shot["focus_method"])
+        == (
+            off_center_still["focus_x"],
+            off_center_still["focus_y"],
+            off_center_still["focus_method"],
+        )
+        for shot in off_center_still_shots
     )
 
     submitted = client.post(
@@ -168,6 +187,16 @@ def test_complete_http_workflow_exports_verified_final_without_modifying_sources
         focus_frame[-1, -1],
     )
     assert all(int(pixel.max()) > 20 for pixel in corners)
+
+    still_focus_frame_path = tmp_path / "off-center-still-focus.png"
+    _extract_frame(
+        ffmpeg,
+        artifact,
+        off_center_still_shots[0]["output_start_ms"] + 400,
+        still_focus_frame_path,
+    )
+    still_focus_frame = _read_frame(still_focus_frame_path)
+    assert float(_red_pixels(still_focus_frame).mean()) > 0.05
 
     red_to_blue = next(
         (before, after)

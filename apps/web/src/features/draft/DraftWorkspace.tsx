@@ -178,7 +178,7 @@ export function DraftWorkspace({ api, project, selection, onBack }: DraftWorkspa
   const previewInFlight =
     previewJobId !== null && (preview.job?.id !== previewJobId || previewActive);
   const finalInFlight = finalJobId !== null && (final.job?.id !== finalJobId || finalActive);
-  const contentLocked = isRestoring || previewInFlight || finalInFlight;
+  const contentLocked = isRestoring || isComposing || startingProfile !== null || previewInFlight || finalInFlight;
 
   return (
     <section className="guided-screen draft-workspace" aria-labelledby="draft-heading">

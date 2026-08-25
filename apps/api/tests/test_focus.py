@@ -117,6 +117,14 @@ def test_static_red_subject_on_green_uses_color_contrast_focus():
     assert result.x < 0.35
 
 
+def test_analyzer_decodes_generated_off_center_still(media_fixture):
+    """Would fail if the real image worker collapsed an off-center still to center."""
+    result = FocusAnalyzer().analyze(media_fixture.paths["still.jpg"], "image")
+
+    assert result.method == "contrast"
+    assert result.x < 0.35
+
+
 def test_face_weight_multiplies_area_by_normalized_haar_confidence():
     """Would fail if Haar detections were treated as fully confident regardless of their score."""
     detector = OpenCVSubjectDetector()
@@ -138,7 +146,7 @@ def test_analyzer_invokes_bounded_worker_and_parses_result(monkeypatch, tmp_path
         calls.append((args, kwargs))
         return subprocess.CompletedProcess(
             args[0], 0, json.dumps({
-                "x": 0.3, "y": 0.7, "confidence": 0.8, "method": "face", "analyzer_version": 1,
+                "x": 0.3, "y": 0.7, "confidence": 0.8, "method": "face", "analyzer_version": 2,
             }), "",
         )
 
@@ -158,10 +166,10 @@ def test_analyzer_invokes_bounded_worker_and_parses_result(monkeypatch, tmp_path
     [
         subprocess.CompletedProcess([], 1, "", "worker failed"),
         subprocess.CompletedProcess([], 0, "not json", ""),
-        subprocess.CompletedProcess([], 0, '{"x": 1.1, "y": 0.5, "confidence": 0.4, "method": "face", "analyzer_version": 1}', ""),
-        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": "unknown", "analyzer_version": 1}', ""),
-        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": [], "analyzer_version": 1}', ""),
-        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": {}, "analyzer_version": 1}', ""),
+        subprocess.CompletedProcess([], 0, '{"x": 1.1, "y": 0.5, "confidence": 0.4, "method": "face", "analyzer_version": 2}', ""),
+        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": "unknown", "analyzer_version": 2}', ""),
+        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": [], "analyzer_version": 2}', ""),
+        subprocess.CompletedProcess([], 0, '{"x": 0.5, "y": 0.5, "confidence": 0.4, "method": {}, "analyzer_version": 2}', ""),
     ],
 )
 def test_analyzer_invalid_worker_result_returns_center(monkeypatch, tmp_path, completed):

@@ -80,7 +80,8 @@ def generate_fixture_media(root: Path) -> dict[str, Path]:
         )
         _run_ffmpeg(
             [
-                "-f", "lavfi", "-i", "color=c=yellow:s=320x240",
+                "-f", "lavfi", "-i", "color=c=green:s=320x240",
+                "-vf", "drawbox=x=8:y=40:w=64:h=160:color=red:t=fill",
                 "-frames:v", "1", str(paths["still.jpg"]),
             ]
         )
