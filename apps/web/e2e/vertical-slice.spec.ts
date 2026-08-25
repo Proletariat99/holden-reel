@@ -37,16 +37,20 @@ test("creates a project and exports a playable, seekable reel", async ({ page })
   await page.getByLabel("Absolute folder path").fill(fixture.folderPath);
   await page.getByRole("button", { name: "Import folder" }).click();
   await page.getByRole("radio", { name: /song\.wav/ }).check();
-  await page.getByRole("checkbox", { name: /red\.mp4/ }).check();
-  await page.getByRole("checkbox", { name: /blue\.mp4/ }).check();
-  await page.getByRole("checkbox", { name: /still\.jpg/ }).check();
+  await page.getByRole("checkbox", { name: /off-center\.mp4/ }).check();
+  await page.getByRole("checkbox", { name: /left-red\.mp4/ }).check();
+  await page.getByRole("checkbox", { name: /right-blue\.mp4/ }).check();
   await page.getByRole("button", { name: "Continue" }).click();
 
   await page.getByRole("radio", { name: "15 seconds" }).check();
+  const quickDissolve = page.getByRole("radio", { name: "Quick dissolve" });
+  await quickDissolve.check();
+  await expect(quickDissolve).toBeChecked();
   await page.getByRole("button", { name: "Generate draft" }).click();
 
   const preview = page.getByLabel("Reel preview");
   await expect(preview).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Quick dissolve · 200 ms")).toBeVisible();
   const playback = await preview.evaluate(async (element) => {
     const video = element as HTMLVideoElement;
     video.muted = true;

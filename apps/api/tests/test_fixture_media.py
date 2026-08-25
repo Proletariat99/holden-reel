@@ -6,6 +6,22 @@ import pytest
 import fixture_media
 
 
+def test_fixture_generation_produces_every_real_media_acceptance_source(tmp_path):
+    """Would fail if the real focus or dissolve source were absent from acceptance."""
+    paths = fixture_media.generate_fixture_media(tmp_path / "complete-fixture")
+
+    assert set(paths) == {
+        "red.mp4",
+        "blue.mp4",
+        "off-center.mp4",
+        "left-red.mp4",
+        "right-blue.mp4",
+        "still.jpg",
+        "song.wav",
+    }
+    assert all(path.is_file() and path.stat().st_size > 0 for path in paths.values())
+
+
 def test_fixture_generation_times_out_and_removes_partial_outputs(
     tmp_path, monkeypatch
 ):

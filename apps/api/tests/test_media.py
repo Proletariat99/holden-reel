@@ -377,11 +377,14 @@ def test_import_folder_catalogs_supported_media_without_copying(client, media_fi
     assert response.status_code == 201
     assets = response.json()["assets"]
     assert {asset["kind"] for asset in assets} == {"video", "image", "audio"}
-    assert len(assets) == 4
+    assert len(assets) == 7
     assert all(Path(asset["path"]).is_relative_to(media_fixture.root) for asset in assets)
     assert [Path(asset["path"]).name for asset in assets] == [
         "blue.mp4",
+        "left-red.mp4",
+        "off-center.mp4",
         "red.mp4",
+        "right-blue.mp4",
         "song.wav",
         "still.jpg",
     ]
@@ -511,6 +514,9 @@ def test_import_directory_ignores_unsupported_files(client, media_fixture):
     assert {Path(asset["path"]).name for asset in response.json()["assets"]} == {
         "red.mp4",
         "blue.mp4",
+        "off-center.mp4",
+        "left-red.mp4",
+        "right-blue.mp4",
         "still.jpg",
         "song.wav",
     }
@@ -527,8 +533,8 @@ def test_reimporting_a_folder_returns_existing_assets_once(client, media_fixture
 
     assert first.status_code == 201
     assert second.status_code == 201
-    assert len(second.json()["assets"]) == 4
-    assert len(listed.json()["assets"]) == 4
+    assert len(second.json()["assets"]) == 7
+    assert len(listed.json()["assets"]) == 7
     assert {asset["id"] for asset in second.json()["assets"]} == {
         asset["id"] for asset in first.json()["assets"]
     }

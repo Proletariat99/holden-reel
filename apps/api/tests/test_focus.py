@@ -92,7 +92,29 @@ def test_video_candidates_reduce_to_one_robust_fixed_point():
 def test_low_signal_and_detector_failure_return_center():
     """Would fail if unreadable or low-signal media could create an arbitrary crop."""
     assert choose_focus([solid_frame()], EmptyDetector()) == center_focus()
+    solid_green = np.full((120, 160, 3), (0, 128, 0), dtype=np.uint8)
+    assert choose_focus([solid_green], EmptyDetector()) == center_focus()
     assert choose_focus([solid_frame()], RaisingDetector()) == center_focus()
+
+
+def test_motion_fallback_remains_grayscale_and_outranks_static_contrast():
+    """Would fail if color contrast replaced the temporal motion decision path."""
+    result = choose_focus(
+        [frame_with_box(x=20), frame_with_box(x=80)], EmptyDetector()
+    )
+
+    assert result.method == "motion"
+
+
+def test_static_red_subject_on_green_uses_color_contrast_focus():
+    """Would fail if grayscale contrast discarded an off-center chromatic subject."""
+    frame = np.full((360, 640, 3), (0, 128, 0), dtype=np.uint8)
+    frame[70:290, 20:170] = (0, 0, 255)
+
+    result = choose_focus([frame], EmptyDetector())
+
+    assert result.method == "contrast"
+    assert result.x < 0.35
 
 
 def test_face_weight_multiplies_area_by_normalized_haar_confidence():

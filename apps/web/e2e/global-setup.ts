@@ -3,12 +3,20 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-interface FixtureManifest { "red.mp4": string; "blue.mp4": string; "still.jpg": string; "song.wav": string }
+interface FixtureManifest {
+  "red.mp4": string;
+  "blue.mp4": string;
+  "off-center.mp4": string;
+  "left-red.mp4": string;
+  "right-blue.mp4": string;
+  "still.jpg": string;
+  "song.wav": string;
+}
 interface ProcessState { error: Error | null; output: string[]; exited: boolean }
 interface OwnedProcess { id: number; name: string; pid?: number; port?: number; state: ProcessState }
 interface GuardianMessage { type: string; id?: number; pid?: number; data?: string; error?: string; code?: number | null }
 
-const FIXTURE_MEDIA_FILE_COUNT = 4;
+const FIXTURE_MEDIA_FILE_COUNT = 7;
 const FIXTURE_FFMPEG_TIMEOUT_MS = 30_000;
 const FIXTURE_WATCHDOG_GRACE_MS = 15_000;
 const FIXTURE_GENERATION_TIMEOUT_MS = FIXTURE_MEDIA_FILE_COUNT * FIXTURE_FFMPEG_TIMEOUT_MS + FIXTURE_WATCHDOG_GRACE_MS;

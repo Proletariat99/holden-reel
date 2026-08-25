@@ -124,8 +124,8 @@ def _visual_fallback(frames: Sequence[np.ndarray]) -> FocusResult:
         if motion_energy >= 0.01:
             edge_map = _edge_magnitude(gray_frames[-1])
             return _centroid_result(diff_map + edge_map, min(motion_energy, 1.0), "motion")
-    contrast_map = _edge_magnitude(gray_frames[-1])
-    contrast_energy = min(float(contrast_map.mean()) / 255.0, 1.0)
+    contrast_map = _color_edge_magnitude(frames[-1])
+    contrast_energy = min(float(np.sqrt(np.mean(np.square(contrast_map)))) / 255.0, 1.0)
     return _centroid_result(contrast_map, contrast_energy, "contrast")
 
 
@@ -139,6 +139,14 @@ def _edge_magnitude(frame: np.ndarray) -> np.ndarray:
     sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     laplacian = cv2.Laplacian(gray, cv2.CV_32F)
     return np.abs(sobel_x) + np.abs(sobel_y) + np.abs(laplacian)
+
+
+def _color_edge_magnitude(frame: np.ndarray) -> np.ndarray:
+    channels = cv2.split(frame) if frame.ndim == 3 else (frame,)
+    channel_edges = np.asarray(
+        [_edge_magnitude(channel) for channel in channels], dtype=np.float64
+    )
+    return np.sqrt(np.sum(np.square(channel_edges), axis=0))
 
 
 def _centroid_result(signal: np.ndarray, confidence: float, method: Literal["motion", "contrast"]) -> FocusResult:
