@@ -37,6 +37,9 @@ cd ../..
 pnpm --dir apps/web exec playwright install chromium
 ```
 
+The locked `uv sync` command installs `opencv-python-headless`; no separate
+OpenCV installation is needed.
+
 ## Run locally
 
 Start both processes from the repository root:
@@ -57,6 +60,16 @@ screen. The API catalogs supported files in place; it does not copy or modify
 source media. Create a project, import a folder, choose one audio file and at
 least one video or image, generate the 15-second draft, inspect and seek the
 preview, export the final reel, and download the MP4.
+
+Visual imports are analyzed locally for a subject-aware focus point. Analysis
+uses at most 9 low-resolution frames per visual and has a 10-second subprocess
+timeout. The focus point is cached for unchanged files; re-importing after a
+source file changes or the analyzer version advances refreshes it. Rendering
+uses that point for a fixed portrait crop, so the framing does not track or
+move during a shot.
+
+Drafts default to **Clean cut**. **Quick dissolve** adds a fixed 200 ms overlap
+between visuals only; it does not crossfade the audio.
 
 ## Configuration
 
@@ -116,6 +129,12 @@ uv run python tests/fixture_media.py --output "$PWD/test-results/manual-fixture"
 Copy the containing folder path printed in the JSON manifest into the import
 screen. The fixtures are generated colors, a still image, and a sine wave; the
 test suite never requires user media or a remote AI service.
+
+For manual acceptance with representative media, import a Holden Reed `.mov`
+and compare its subject-aware portrait framing with a centered crop. Render one
+preview with Clean cut and another with Quick dissolve, checking that the
+performer stays visible in a stable crop with no black space. Holden Reel
+references original media in place and never copies or modifies it.
 
 Run the complete Playwright workflow with one Chromium worker:
 

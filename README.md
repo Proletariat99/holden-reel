@@ -14,8 +14,14 @@ postable Reel in under 10 minutes.
 > [!NOTE]
 > The deterministic local ingest-to-export vertical slice is complete. It
 > creates projects, catalogs local media in place, persists a 15- or 30-second
-> reel plan, renders playable previews, and exports verified MP4 files. The
-> constrained creative agent and guided refinement remain future work.
+> reel plan, uses local subject-aware analysis to hold each shot on a fixed
+> portrait crop, renders playable previews with either Clean cut or Quick
+> dissolve transitions, and exports verified MP4 files. The constrained
+> creative agent and guided refinement remain future work.
+
+Focus analysis uses the bundled OpenCV logic and sends nothing off-machine. A
+first import may take a little longer while visual focus is analyzed; unchanged
+files reuse the cached focus on later imports.
 
 ## Quick start
 
